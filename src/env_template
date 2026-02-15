@@ -1,0 +1,3 @@
+GROQ_API_KEY=your_groq_api_key
+CLASS_SUBJECT_NAME=class_12/biology
+DEVICE=cpu  # Set to 'cuda' for GPU, 'cpu' for CPU
