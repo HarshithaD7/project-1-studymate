@@ -212,6 +212,9 @@ cython_debug/
 *.bin
 .venv/
 
+vector_db
+chapters_vector_db
+
 
 # Marimo
 marimo/_static/
