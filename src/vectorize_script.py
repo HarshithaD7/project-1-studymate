@@ -1,14 +1,25 @@
 import os
 from dotenv import load_dotenv
-from vectorize_book import vectorize_book_and_store_to_db, vectorize_chapters
 
+from vectorize_book import (
+    vectorize_ncert,
+    vectorize_pyqs,
+    vectorize_model_answers
+)
 
 load_dotenv()
 
-CLASS_SUBJECT_NAME = os.getenv('CLASS_SUBJECT_NAME')
+print("\n==============================")
+print("BIOASSIST VECTORIZATION")
+print("==============================\n")
 
+try:
+    vectorize_ncert("class_11")
+    vectorize_ncert("class_12")
+    vectorize_pyqs()
+    vectorize_model_answers()
 
-vectorize_book_and_store_to_db(
-    CLASS_SUBJECT_NAME, "class_12_biology_vector_db"
-)
-vectorize_chapters(CLASS_SUBJECT_NAME)
+    print("\n✅ All vectorization completed!")
+
+except Exception as e:
+    print(f"❌ Vectorization error: {e}")
