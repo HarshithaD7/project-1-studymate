@@ -1,5 +1,6 @@
 import json
 import re
+import time
 
 from rag_service import (
     retrieve_ncert,
@@ -37,6 +38,66 @@ def safe_list(value):
         return [value]
 
     return [str(value)]
+
+
+def is_low_content_gibberish(letters_and_digits_only):
+    """
+    Catches keyboard-mash / placeholder input like "nnnn",
+    "asdasd", "xxxxx", "1111" that carries no real Biology
+    content -- BEFORE it ever reaches the LLM.
+
+    Why this exists: the LLM was scoring "nnnn" a 4/10 on a
+    3-mark question. The word-count depth cap (see
+    apply_answer_depth_cap) only limits the CEILING for short
+    answers -- for a <12-word 3-mark answer that ceiling is
+    min(score, 4), so a lenient LLM score of 4+ came through
+    as exactly 4. The post-parse "empty correct_points" clamp
+    didn't catch it either, because the LLM sometimes invents
+    a correct_points entry even for nonsense input. None of
+    that is reliable for zero-content input, so it is rejected
+    deterministically first.
+    """
+
+    text = re.sub(
+        r"[^a-z0-9]",
+        "",
+        letters_and_digits_only
+    )
+
+    if len(text) < 3:
+        return True
+
+    unique_chars = set(text)
+
+    if len(unique_chars) <= 2:
+        return True
+
+    most_common_count = max(
+        text.count(char)
+        for char in unique_chars
+    )
+
+    if most_common_count / len(text) >= 0.6:
+        return True
+
+    has_letters = any(
+        char.isalpha()
+        for char in text
+    )
+
+    has_vowel = any(
+        char in "aeiou"
+        for char in text
+    )
+
+    if (
+        has_letters
+        and not has_vowel
+        and len(text) >= 4
+    ):
+        return True
+
+    return False
 
 
 def safe_score(value):
@@ -132,19 +193,39 @@ def extract_option_letter(value):
         B.
         (B)
         B) A small letter
+
+    IMPORTANT:
+    The delimiter after the letter (), ., :, -) or the end
+    of the string is REQUIRED here. Without that requirement,
+    any word that simply starts with a/b/c/d -- DNA, Diabetes,
+    Auxin, Biotechnology, Cytokinin, Chromosome, and plenty of
+    other real Biology terms -- would be misread as "option
+    letter + leftover text", corrupting the comparison.
     """
 
     value = normalize_text(
         value
     )
 
-    match = re.match(
-        r"^\(?\s*([a-d])\s*[\)\.\:\-]?",
+    # Whole string is just the letter, e.g. "b", "(b)"
+    exact_match = re.fullmatch(
+        r"\(?\s*([a-d])\s*\)?",
         value
     )
 
-    if match:
-        return match.group(1)
+    if exact_match:
+        return exact_match.group(1)
+
+    # Letter immediately followed by a real delimiter, and
+    # then either more text or the end of the string, e.g.
+    # "b)", "b.", "b) a small letter"
+    prefix_match = re.match(
+        r"^\(?\s*([a-d])[\)\.\:\-](?:\s+|$)",
+        value
+    )
+
+    if prefix_match:
+        return prefix_match.group(1)
 
     return ""
 
@@ -154,16 +235,28 @@ def remove_option_letter(value):
     B) A small letter
         ->
     a small letter
+
+    Only strips a leading letter when it is followed by a
+    genuine delimiter (or is the entire string). A word like
+    "DNA" or "Diabetes" is left untouched -- see the note in
+    extract_option_letter() for why this guard is required.
     """
 
     value = normalize_text(
         value
     )
 
-    value = re.sub(
-        r"^\(?\s*[a-d]\s*[\)\.\:\-]?\s*",
-        "",
+    if re.fullmatch(
+        r"\(?\s*[a-d]\s*\)?",
         value
+    ):
+        return ""
+
+    value = re.sub(
+        r"^\(?\s*[a-d][\)\.\:\-](?:\s+|$)",
+        "",
+        value,
+        count=1
     )
 
     value = re.sub(
@@ -333,6 +426,236 @@ def evaluate_mcq_answer(
 
 
 # =========================================================
+# UNVERIFIED MCQ (real previous-year question, no stored
+# answer key)
+#
+# IMPORTANT DESIGN NOTE:
+# Earlier this asked the LLM to grade the student directly
+# ("is this correct? score it"), which is exactly the kind
+# of self-graded judgment call small LLMs tend to answer
+# leniently/agreeably on -- reported symptom was "even a
+# wrong option gets accepted as right". To remove that
+# failure mode, the LLM is now asked ONLY the narrower,
+# more factual question "which option is correct", and the
+# actual accept/reject decision is made deterministically
+# here in code by comparing letters -- the LLM's own score
+# self-assessment is never trusted.
+# =========================================================
+
+def evaluate_unverified_mcq(
+    question,
+    student_answer,
+    selected_class,
+    chapter,
+    options
+):
+
+    try:
+
+        docs = retrieve_ncert(
+            question,
+            selected_class,
+            chapter,
+            # Identifying the correct option out of 4 doesn't need
+            # as much grounding as a full descriptive evaluation --
+            # trimmed the same way as evaluate_answer() above to
+            # keep this LLM round trip fast.
+            k=3
+        )
+
+    except Exception:
+
+        docs = []
+
+    context_parts = []
+
+    for doc in docs or []:
+
+        content = getattr(
+            doc,
+            "page_content",
+            ""
+        )
+
+        if content:
+
+            context_parts.append(
+                content[:900]
+            )
+
+    ncert_context = "\n\n".join(
+        context_parts
+    )
+
+    lettered_options = []
+
+    for index, option_text in enumerate(options):
+
+        letter = chr(65 + index)
+
+        lettered_options.append(
+            f"{letter}) {option_text}"
+        )
+
+    options_block = "\n".join(
+        lettered_options
+    )
+
+    prompt = f"""
+You are BioAssist, an NCERT Biology expert.
+
+This is a 1-mark multiple choice question from a real CBSE
+Class 12 Biology previous-year paper. There is no stored
+answer key, so you must work out the correct option yourself.
+
+CLASS:
+{selected_class}
+
+CHAPTER:
+{chapter}
+
+QUESTION:
+
+{question}
+
+OPTIONS:
+
+{options_block}
+
+RETRIEVED NCERT EVIDENCE (may be empty or incomplete):
+
+{ncert_context}
+
+TASK:
+
+Identify which ONE of the four options (A, B, C, or D) is
+scientifically correct. Prefer the retrieved NCERT evidence
+when it is relevant; otherwise rely on accurate NCERT Class
+12 Biology knowledge. Exactly one option must be chosen, even
+if you are not fully certain.
+
+Return ONLY valid JSON in this exact shape:
+
+{{
+    "correct_option": "A",
+    "explanation": ""
+}}
+"""
+
+    student_letter = extract_option_letter(
+        student_answer
+    )
+
+    try:
+
+        _llm_start = time.time()
+
+        response = get_llm().invoke(
+            prompt
+        )
+
+        print(f"[BioAssist timing] LLM call (evaluate_unverified_mcq, every call): {time.time() - _llm_start:.2f}s")
+
+        parsed = parse_json_response(
+            response.content
+        )
+
+    except Exception:
+
+        parsed = None
+
+    if not parsed or not str(
+        parsed.get("correct_option", "")
+    ).strip():
+
+        return {
+            "score": 0,
+            "exam_marks": 0,
+            "max_marks": 1,
+            "correct_points": [],
+            "missing_points": [
+                "BioAssist could not verify this question "
+                "right now."
+            ],
+            "missing_keywords": [],
+            "improvement":
+                "Please submit your answer again.",
+            "model_answer": ""
+        }
+
+    raw_letter = normalize_text(
+        parsed.get("correct_option", "")
+    ).replace(")", "").replace(".", "").strip()
+
+    correct_letter = raw_letter[:1] if raw_letter else ""
+
+    explanation = str(
+        parsed.get("explanation", "")
+    ).strip()
+
+    correct_option_text = ""
+
+    if correct_letter:
+
+        index = ord(correct_letter) - 97
+
+        if 0 <= index < len(options):
+            correct_option_text = options[index]
+
+    model_answer = (
+        f"{correct_letter.upper()}) {correct_option_text}"
+        if correct_option_text
+        else correct_letter.upper()
+    )
+
+    is_correct = (
+        bool(student_letter)
+        and bool(correct_letter)
+        and student_letter == correct_letter
+    )
+
+    if is_correct:
+
+        correct_points = [
+            "You selected the correct option."
+        ]
+
+        if explanation:
+            correct_points.append(explanation)
+
+        return {
+            "score": 10,
+            "exam_marks": 1,
+            "max_marks": 1,
+            "correct_points": correct_points,
+            "missing_points": [],
+            "missing_keywords": [],
+            "improvement":
+                "Your answer is correct.",
+            "model_answer": model_answer
+        }
+
+    missing_points = [
+        f"The correct answer is {model_answer}."
+    ]
+
+    if explanation:
+        missing_points.append(explanation)
+
+    return {
+        "score": 0,
+        "exam_marks": 0,
+        "max_marks": 1,
+        "correct_points": [],
+        "missing_points": missing_points,
+        "missing_keywords": [],
+        "improvement":
+            "Review the relevant NCERT concept and try again.",
+        "model_answer": model_answer
+    }
+
+
+# =========================================================
 # EXPECTED DEPTH
 # =========================================================
 
@@ -341,6 +664,17 @@ def get_depth_instruction(
 ):
 
     rules = {
+
+        "1 Mark": """
+This is a 1-mark question.
+
+A complete answer should normally be one precise NCERT
+fact, term, or concept -- not a full explanation.
+
+Do not penalize brevity here the way longer answers are
+penalized; a short, correct, on-topic answer can receive
+full marks.
+""",
 
         "2 Mark": """
 This is a 2-mark question.
@@ -552,6 +886,7 @@ def get_max_marks(
 
     mapping = {
         "MCQ / 1 Mark": 1,
+        "1 Mark": 1,
         "2 Mark": 2,
         "3 Mark": 3,
         "4 Mark": 4,
@@ -603,7 +938,8 @@ def evaluate_answer(
     selected_class,
     chapter,
     expected_answer="",
-    question_level="3 Mark"
+    question_level="3 Mark",
+    options=None
 ):
 
     question = str(
@@ -617,6 +953,12 @@ def evaluate_answer(
     expected_answer = str(
         expected_answer or ""
     ).strip()
+
+    options = [
+        str(option).strip()
+        for option in (options or [])
+        if str(option).strip()
+    ]
 
 
     # =====================================================
@@ -645,31 +987,85 @@ def evaluate_answer(
 
 
     # =====================================================
-    # MCQ
+    # NON-ANSWER ("not sure", "don't know", etc.)
+    #
+    # These carry zero Biology content, so there is nothing
+    # for an LLM to legitimately score above 0 -- but LLMs
+    # tend to be agreeable/generous even here, and even a
+    # generic safety clamp can leave a non-zero floor. This
+    # is graded deterministically instead of ever reaching
+    # the LLM, for MCQ and descriptive questions alike.
+    # =====================================================
+
+    NON_ANSWER_PHRASES = {
+        "not sure", "notsure", "not sure sir", "not sure about this",
+        "dont know", "don't know", "do not know", "i dont know",
+        "i don't know", "idk", "no idea", "not aware", "unaware",
+        "cant say", "can't say", "no answer", "skip", "pass",
+        "i have no idea", "not known", "unknown", "na", "n/a", "?",
+    }
+
+    normalized_student_answer = re.sub(
+        r"[^a-z0-9\s]",
+        "",
+        student_answer.lower()
+    ).strip()
+
+    normalized_student_answer = re.sub(
+        r"\s+",
+        " ",
+        normalized_student_answer
+    )
+
+    is_non_answer = (
+        normalized_student_answer in NON_ANSWER_PHRASES
+        or is_low_content_gibberish(
+            normalized_student_answer
+        )
+    )
+
+    if (
+        question_level != "MCQ / 1 Mark"
+        and is_non_answer
+    ):
+
+        return {
+            "score": 0,
+            "exam_marks": 0,
+            "max_marks":
+                get_max_marks(
+                    question_level
+                ),
+            "correct_points": [],
+            "missing_points": [
+                "No real attempt was made at this question."
+            ],
+            "missing_keywords": [],
+            "improvement":
+                "Try writing what you remember, even if "
+                "you're unsure -- a partial, on-topic attempt "
+                "can still earn marks, but random text or "
+                "\"not sure\" cannot.",
+            "model_answer":
+                expected_answer
+        }
+
+
+    # =====================================================
+    # MCQ WITH A KNOWN ANSWER KEY
     #
     # IMPORTANT:
     # Do NOT ask the LLM to decide the answer again.
     # Use the generated expected answer.
+    #
+    # This only applies when expected_answer is available
+    # (system-generated questions always provide one). Real
+    # previous-year MCQs have no stored answer key, so those
+    # fall through to the NCERT-grounded LLM evaluation
+    # below instead of erroring out.
     # =====================================================
 
-    if question_level == "MCQ / 1 Mark":
-
-        if not expected_answer:
-
-            return {
-                "score": 0,
-                "exam_marks": 0,
-                "max_marks": 1,
-                "correct_points": [],
-                "missing_points": [
-                    "The expected answer was not available."
-                ],
-                "missing_keywords": [],
-                "improvement":
-                    "Generate a new question and try again.",
-                "model_answer": ""
-            }
-
+    if question_level == "MCQ / 1 Mark" and expected_answer:
 
         is_correct = evaluate_mcq_answer(
             student_answer,
@@ -712,6 +1108,31 @@ def evaluate_answer(
 
 
     # =====================================================
+    # MCQ WITHOUT A KNOWN ANSWER KEY (real previous-year MCQ)
+    #
+    # Handled entirely by evaluate_unverified_mcq(), which
+    # makes the correct/incorrect decision deterministically
+    # in code rather than trusting an LLM self-reported score.
+    # This short-circuits before the generic descriptive
+    # prompt below, which is no longer MCQ-aware.
+    # =====================================================
+
+    if (
+        question_level == "MCQ / 1 Mark"
+        and not expected_answer
+        and options
+    ):
+
+        return evaluate_unverified_mcq(
+            question,
+            student_answer,
+            selected_class,
+            chapter,
+            options
+        )
+
+
+    # =====================================================
     # RETRIEVE NCERT EVIDENCE FOR DESCRIPTIVE ANSWERS
     # =====================================================
 
@@ -721,7 +1142,13 @@ def evaluate_answer(
             question,
             selected_class,
             chapter,
-            k=5
+            # Fewer, more targeted chunks: k=5 at 1600 chars each
+            # (up to 8000 chars of context) was making every
+            # evaluation prompt large enough to noticeably slow
+            # down the LLM round trip. The top 3 chunks carry
+            # almost all the relevant grounding; the 4th/5th
+            # added bulk more than signal.
+            k=3
         )
 
     except Exception:
@@ -742,7 +1169,7 @@ def evaluate_answer(
         if content:
 
             context_parts.append(
-                content[:1600]
+                content[:900]
             )
 
 
@@ -754,6 +1181,25 @@ def evaluate_answer(
     depth_instruction = get_depth_instruction(
         question_level
     )
+
+
+    # =====================================================
+    # MARK-DEPTH SCORING RULES
+    # =====================================================
+
+    mark_depth_rules = """
+8. A 5-mark answer containing only one or two short points
+   must NOT receive 10/10.
+
+9. A 4-mark answer containing only one short fact must NOT
+   receive full marks.
+
+10. A 3-mark answer should normally contain around three
+    important relevant ideas/steps/points.
+
+11. A 2-mark answer should normally contain around two
+    important relevant ideas/points.
+"""
 
 
     # =====================================================
@@ -816,21 +1262,18 @@ SCORING RULES:
 
 6. Do NOT reward irrelevant padding.
 
+6a. If the student's answer is factually wrong, contradicts
+    the reference answer / NCERT evidence, or is off-topic,
+    you MUST score it 0-2 regardless of length, fluency, or
+    confident tone. A long, well-written but incorrect answer
+    is still incorrect -- do not award marks for effort alone.
+
+6b. If "correct_points" would be empty (the student got
+    nothing meaningfully right), the score must be 3 or below.
+
 7. The answer must have sufficient DEPTH for the selected
    mark level.
-
-8. A 5-mark answer containing only one or two short points
-   must NOT receive 10/10.
-
-9. A 4-mark answer containing only one short fact must NOT
-   receive full marks.
-
-10. A 3-mark answer should normally contain around three
-    important relevant ideas/steps/points.
-
-11. A 2-mark answer should normally contain around two
-    important relevant ideas/points.
-
+{mark_depth_rules}
 12. If the student's answer fully covers the expected
     answer accurately, it may receive 10/10.
 
@@ -867,9 +1310,13 @@ Return ONLY valid JSON:
 
     try:
 
+        _llm_start = time.time()
+
         response = get_llm().invoke(
             prompt
         )
+
+        print(f"[BioAssist timing] LLM call (evaluate_answer, every call): {time.time() - _llm_start:.2f}s")
 
         parsed = parse_json_response(
             response.content
@@ -922,6 +1369,29 @@ Return ONLY valid JSON:
                 []
             )
         )
+
+
+        # =================================================
+        # DETERMINISTIC SAFETY CLAMP
+        #
+        # Prompt rule 6b already tells the LLM to keep the
+        # score low when it found nothing correct, but LLM
+        # self-scoring is exactly where leniency creeps in
+        # (a wordy-but-wrong answer scoring high). This is a
+        # code-level backstop: if the model's OWN analysis
+        # says it found no correct points, the score cannot
+        # exceed 2, no matter what number it self-reported.
+        # (Genuine non-answers like "not sure" never reach
+        # this code at all -- see the NON-ANSWER check above,
+        # which returns 0 directly.)
+        # =================================================
+
+        if (
+            not correct_points
+            and score > 2
+        ):
+
+            score = 2
 
 
         missing_points = safe_list(

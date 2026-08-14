@@ -1,5 +1,6 @@
 import json
 import random
+import re
 
 from rag_service import (
     retrieve_ncert,
@@ -69,6 +70,16 @@ If it is an MCQ:
 - provide the correct answer
 """,
 
+        "1 Mark": """
+Generate ONE 1-mark Biology short-answer question -- NOT
+a multiple-choice question.
+
+The expected answer should be a single precise fact,
+term, or concept from NCERT. Keep it short and specific.
+
+Set "options" to an empty array.
+""",
+
         "2 Mark": """
 Generate ONE 2-mark short-answer Biology question.
 
@@ -105,6 +116,82 @@ well-structured NCERT-grounded explanation.
 
 
 # =========================================================
+# RECONCILE MCQ ANSWER AGAINST OPTIONS
+#
+# The prompt instructs the LLM to make "answer" an exact
+# copy of one of the "options" strings, but an 8B model is
+# not guaranteed to follow that format perfectly. Without
+# this, evaluate_mcq_answer() in answer_evaluator.py cannot
+# reliably match a student's correct selection against a
+# reworded/prefixed answer string. This snaps "answer" back
+# to the exact option text whenever possible.
+# =========================================================
+
+def _normalize_for_match(value):
+
+    return re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        str(value or "").lower()
+    ).strip()
+
+
+def reconcile_mcq_answer(
+    answer,
+    options
+):
+
+    if not options:
+        return answer
+
+    normalized_answer = _normalize_for_match(
+        answer
+    )
+
+    if not normalized_answer:
+        return answer
+
+    # Exact normalized match.
+    for option in options:
+
+        if _normalize_for_match(option) == normalized_answer:
+            return option
+
+    # Partial containment (e.g. answer came back as
+    # "B) DNA" or wrapped in a short sentence).
+    best_option = ""
+    best_overlap = 0
+
+    for option in options:
+
+        normalized_option = _normalize_for_match(
+            option
+        )
+
+        if not normalized_option:
+            continue
+
+        if (
+            normalized_option in normalized_answer
+            or normalized_answer in normalized_option
+        ):
+
+            overlap = min(
+                len(normalized_option),
+                len(normalized_answer)
+            )
+
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_option = option
+
+    if best_option:
+        return best_option
+
+    return answer
+
+
+# =========================================================
 # GENERATE EVALUATION QUESTION
 # =========================================================
 
@@ -121,7 +208,10 @@ def generate_evaluation_question(
         chapter,
         selected_class,
         chapter,
-        k=8
+        # Only 3 of these are ever sampled into the prompt below;
+        # k=8 was retrieving more candidates than needed for that,
+        # adding retrieval time without adding variety.
+        k=5
     )
 
     if not docs:
@@ -277,6 +367,11 @@ STRICT RULES:
 10. For MCQ / 1 Mark:
     - generate exactly four options if using MCQ
     - options must be meaningful.
+    - the "answer" field MUST be an EXACT, character-for-
+      character copy of one of the 4 strings in "options".
+    - do NOT add a letter prefix (no "A)", no "B."), do NOT
+      rephrase it, do NOT turn it into a sentence. Copy the
+      matching option text exactly as it appears in "options".
 
 11. For 2/3/4/5 Mark:
     - options must be an empty array.
@@ -365,6 +460,35 @@ Return exactly:
                 "error":
                     "BioAssist did not generate a valid question."
             }
+
+
+        # =====================================================
+        # MCQ ANSWER MUST MATCH AN OPTION
+        # =====================================================
+
+        if options:
+
+            answer = reconcile_mcq_answer(
+                answer,
+                options
+            )
+
+            if _normalize_for_match(
+                answer
+            ) not in [
+                _normalize_for_match(option)
+                for option in options
+            ]:
+
+                return {
+                    "question": "",
+                    "options": [],
+                    "answer": "",
+                    "error":
+                        "BioAssist generated an MCQ answer that "
+                        "did not match any option. Please try "
+                        "generating the question again."
+                }
 
 
         return {

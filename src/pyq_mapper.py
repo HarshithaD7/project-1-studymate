@@ -3,6 +3,8 @@ import json
 import re
 from collections import defaultdict
 
+import streamlit as st
+
 
 # =========================================================
 # PATH
@@ -107,7 +109,15 @@ def normalize_question(
 # LOAD BANK
 # =========================================================
 
+@st.cache_data(ttl=300)
 def load_question_bank():
+    # Streamlit reruns the whole script on every widget
+    # interaction, and this file now holds 500+ records --
+    # re-reading and re-parsing it from disk on every single
+    # rerun (chapter box caption, practice question fetch,
+    # progress page, etc.) added up across the app. Cached for
+    # 5 minutes so a manual question-bank rebuild is picked up
+    # without requiring a full app restart.
 
     if not os.path.exists(
         PYQ_JSON_PATH

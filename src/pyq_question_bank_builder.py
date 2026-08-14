@@ -231,10 +231,20 @@ def strip_answer_blocks(text):
 
         # ---------------------------------------------
         # START PROVIDED ANSWER
+        #
+        # Some solved-paper PDFs use "Solution:" (followed
+        # by "Step 1:", "Step 2:", "Quick Tip") or "Correct
+        # Answer:" instead of "Ans:"/"Answer:". Without
+        # recognising those too, that text bled into the
+        # question -- either merging unrelated questions
+        # together (Solution:...Quick Tip runs right into
+        # the next question with no blank line) or literally
+        # printing the MCQ answer key inside the question
+        # text shown to the student (Correct Answer: ...).
         # ---------------------------------------------
 
         if re.match(
-            r"^(Ans|Answer)\s*:",
+            r"^(Ans|Answer|Solution|Correct\s+Answer)\s*:",
             line,
             re.IGNORECASE
         ):
@@ -436,6 +446,52 @@ def sanitize_for_display(text):
     )
 
     return text.strip()
+
+
+# =========================================================
+# PAGE FOOTER TRUNCATION
+#
+# On some source PDFs, a question's block runs straight into
+# the next page's footer/barcode without a clean line break --
+# and sometimes into several following questions that turned
+# out to be diagram-only (no real text between their number and
+# marks label), e.g.:
+#   "...encourage cross-pollination. 3 011111111111111111112
+#    Page 14 of 23 [ ] 24. 3 25. 3 26. 3 27. 3 ... Page 15 of 23"
+# Stripping individual known-junk substrings after the fact is
+# fragile (each new footer style needs its own pattern and the
+# leaked "24. 3 25. 3..." fragments are hard to tell apart from
+# real content). Instead, the block is hard-truncated at the
+# FIRST footer signature found -- nothing past a page footer is
+# ever part of the actual question.
+# =========================================================
+
+PAGE_FOOTER_SIGNATURE = re.compile(
+    r"_{5,}"
+    # Real "P.T.O." always keeps its periods in extracted text --
+    # the periods here are mandatory (not optional) specifically
+    # so this can never match ordinary words like "hel(p) (t)(o)
+    # encourage" where P/T/O just happen to appear with a space
+    # between them (this was a real false-positive that truncated
+    # a genuine question).
+    r"|\bP\s*\.\s*T\s*\.\s*O\s*\.?"
+    r"|\bP\s+a\s+g\s+e\b\s*\d*"
+    r"|\bPage\s+\d+\s+of\s+\d+\b"
+    r"|\b\d{2}/\d/\d(?:[-/]\d+)?\b"
+    r"|\b0+1{8,}2\b",
+    re.IGNORECASE
+)
+
+
+def truncate_at_page_footer(block):
+
+    match = PAGE_FOOTER_SIGNATURE.search(block)
+
+    if match and match.start() > 15:
+
+        return block[:match.start()]
+
+    return block
 
 
 # =========================================================
@@ -682,6 +738,43 @@ def extract_options(block):
 
 
 # =========================================================
+# ANSWER KEY (when the source explicitly states one)
+#
+# A few solved-paper PDFs print "Correct Answer: (X) <option
+# text>" right after the options. That is a genuine, verified
+# answer key -- far more reliable than asking an LLM to guess
+# the correct option at evaluation time. When present, it is
+# captured here and later lets the app grade that MCQ through
+# the same deterministic path used for system-generated
+# questions, instead of the unverified-MCQ LLM fallback.
+# =========================================================
+
+def extract_answer_key(block, options):
+
+    match = re.search(
+        r"Correct\s+Answer\s*:\s*\(?([A-Da-d])\)?\s*(.*)",
+        block,
+        re.IGNORECASE
+    )
+
+    if not match:
+        return ""
+
+    letter = match.group(1).strip().upper()
+    stated_text = match.group(2).strip()
+
+    index = ord(letter) - ord("A")
+
+    if 0 <= index < len(options):
+        return options[index]
+
+    if stated_text:
+        return stated_text
+
+    return ""
+
+
+# =========================================================
 # QUESTION TYPE
 # =========================================================
 
@@ -690,21 +783,30 @@ def detect_question_type(
     options,
     marks
 ):
+    """
+    IMPORTANT — ordering matters here.
+
+    Visual/diagram detection now runs BEFORE the MCQ check.
+    Previously "len(options) == 4" was checked first, which
+    meant any question block that happened to contain four
+    lettered (a)/(b)/(c)/(d) lines got tagged "MCQ" even when
+    those lines were really: (1) sub-parts of a diagram-
+    labelling question ("Label the following: (a)...(d)..."),
+    or (2) a genuine MCQ whose options describe a diagram/
+    graph/pyramid the student can't actually see in the app.
+    Both cases were slipping past the "exclude Diagram Based"
+    filter in main.py and being served as answerable MCQs,
+    which is the main reason MCQ practice was unreliable.
+
+    A real CBSE MCQ is also always worth 1 mark. If four
+    options were extracted but the block's own marks value
+    explicitly says 2-5, that contradicts a genuine MCQ and
+    almost always means extract_options() picked up lettered
+    sub-parts of a longer descriptive/diagram question instead
+    of real answer choices -- so it is not trusted as MCQ.
+    """
 
     lower = block.lower()
-
-
-    if len(options) == 4:
-
-        return "MCQ"
-
-
-    if (
-        "assertion" in lower
-        and "reason" in lower
-    ):
-
-        return "Assertion-Reason"
 
 
     if any(
@@ -716,12 +818,39 @@ def detect_question_type(
             "draw the",
             "diagram",
             "figure given",
+            # "figure" alone (not just "figure given") was missing
+            # here -- questions phrased "study the figure below",
+            # "in the figure shown", "identify A, B, C in the
+            # figure" etc. were slipping through un-tagged and
+            # being served as normal answerable questions even
+            # though the actual image was never captured.
+            "figure",
             "diagrammatic representation",
-            "schematic representation"
+            "schematic representation",
+            "graph",
+            "chart",
+            "flowchart",
+            "pyramid",
+            "picture given",
+            "picture shown",
+            "observe the picture",
+            "image given",
+            "image shown",
+            "map given",
+            "structure shown",
+            "photograph"
         ]
     ):
 
         return "Diagram Based"
+
+
+    if (
+        "assertion" in lower
+        and "reason" in lower
+    ):
+
+        return "Assertion-Reason"
 
 
     if any(
@@ -736,6 +865,14 @@ def detect_question_type(
     ):
 
         return "Case Based"
+
+
+    if (
+        len(options) == 4
+        and marks in ("Unknown", "1")
+    ):
+
+        return "MCQ"
 
 
     if marks in [
@@ -787,9 +924,10 @@ def clean_question_text(
             continue
 
 
-        # Remove Answer lines if somehow retained.
+        # Remove Answer/Solution/Correct Answer lines if
+        # somehow retained.
         if re.match(
-            r"^(Ans|Answer)\s*:",
+            r"^(Ans|Answer|Solution|Correct\s+Answer)\s*:",
             line,
             re.IGNORECASE
         ):
@@ -896,6 +1034,240 @@ def is_instruction_boilerplate(question):
         phrase in lower
         for phrase in INSTRUCTION_PHRASES
     )
+
+
+# =========================================================
+# SOLVED-ANSWER ARTIFACT FILTER
+#
+# Some solved PYQ compilation PDFs (e.g. certain "solution
+# walkthrough" style papers) don't use a simple "Ans:" /
+# "Answer:" prefix -- they use "Solution: Step 1: ... Step
+# 2: ... Quick Tip". strip_answer_blocks() never learns to
+# skip those (it only recognises "Ans:"/"Answer:"), and
+# because the PDF's text extraction flattens multi-column
+# solved layouts into one blob, the solution text for one
+# question runs straight into the NEXT question's number
+# without a clean line break the question-boundary regex
+# can detect. The result is a single garbled "question"
+# record that actually merges several unrelated questions
+# and their full worked solutions together -- unusable, and
+# it also poisons chapter mapping (mixed topics -> ambiguous
+# embedding). Rather than risk a fragile re-parse of that
+# format, blocks showing these markers are dropped entirely
+# so they never reach students.
+# =========================================================
+
+SOLVED_ANSWER_MARKERS = [
+    "solution:",
+    "quick tip",
+    "step 1:",
+    "step 2:",
+]
+
+
+def contains_solved_answer_artifacts(text):
+
+    lower = str(
+        text or ""
+    ).lower()
+
+    hits = sum(
+        1
+        for marker in SOLVED_ANSWER_MARKERS
+        if marker in lower
+    )
+
+    return hits >= 2
+
+
+# =========================================================
+# KEYWORD CHAPTER HINT
+#
+# map_question_to_chapter() picks a chapter purely from
+# embedding similarity against NCERT chunks, which can
+# misfire on short, fact-heavy MCQs or on chapters that
+# share a lot of vocabulary (e.g. Biotechnology: Principles
+# vs Biotechnology and its Applications; Human Reproduction
+# vs Sexual Reproduction in Flowering Plants). This is a
+# second, independent signal built from distinguishing
+# NCERT terms per chapter -- when it strongly disagrees with
+# the embedding result, it wins, since a clear keyword match
+# ("Bt cotton", "Meselson and Stahl") is a stronger signal
+# than an averaged nearest-neighbour score.
+# =========================================================
+
+CHAPTER_KEYWORDS = {
+
+    "Sexual Reproduction in Flowering Plants": [
+        "pollen grain", "pollination", "anther", "ovule", "embryo sac",
+        "double fertilization", "double fertilisation", "endosperm",
+        "pistil", "stigma", "style", "megasporogenesis", "microsporogenesis",
+        "self-pollination", "self pollination", "cross pollination",
+        "apomixis", "parthenocarpy", "dicot embryo", "synergid",
+        "antipodal", "filiform apparatus", "megaspore mother cell",
+        "microspore mother cell", "pollen tube", "emasculation",
+    ],
+
+    "Human Reproduction": [
+        "testis", "testes", "ovary", "spermatogenesis", "oogenesis",
+        "menstrual cycle", "fallopian tube", "oviduct", "uterus",
+        "implantation", "gastrulation", "placenta", "parturition",
+        "gametogenesis", "seminiferous tubule", "corpus luteum",
+        "graafian follicle", "acrosome", "blastocyst", "gonad",
+        "epididymis", "vas deferens",
+    ],
+
+    "Reproductive Health": [
+        "contraceptive", "contraception", "medical termination of pregnancy",
+        "sexually transmitted", "infertility", "in vitro fertilisation",
+        "in vitro fertilization", "amniocentesis", "reproductive health",
+        "family planning", "zift", "gift", "surrogate", "semen freezing",
+        "copper t", "oral pill",
+    ],
+
+    "Principles of Inheritance and Variation": [
+        "mendel", "monohybrid", "dihybrid", "allele", "genotype",
+        "phenotype", "sex determination", "pedigree", "linkage",
+        "down syndrome", "down's syndrome", "klinefelter", "turner syndrome",
+        "dominant", "recessive", "test cross", "codominance",
+        "law of dominance", "law of segregation", "independent assortment",
+        "haemophilia", "hemophilia", "sickle cell anaemia",
+        "sickle cell anemia", "punnett square",
+    ],
+
+    "Molecular Basis of Inheritance": [
+        "dna replication", "transcription", "translation", "operon",
+        "lac operon", "meselson", "stahl", "hershey", "chase", "griffith",
+        "hnrna", "mrna", "trna", "rrna", "central dogma", "exon", "intron",
+        "genome", "human genome project", "genetic code", "okazaki",
+        "semiconservative", "nucleosome", "promoter", "transcription unit",
+        "template strand", "codon", "anticodon", "rna polymerase",
+    ],
+
+    "Evolution": [
+        "darwin", "natural selection", "lamarck", "hardy-weinberg",
+        "hardy weinberg", "adaptive radiation", "homologous organ",
+        "analogous organ", "fossil", "human evolution", "origin of life",
+        "speciation", "miller", "urey", "industrial melanism",
+        "survival of the fittest",
+    ],
+
+    "Human Health and Diseases": [
+        "pathogen", "immunity", "antigen", "antibody", "aids", "hiv",
+        "cancer", "malaria", "typhoid", "pneumonia", "common cold",
+        "amoebiasis", "ringworm", "drug abuse", "vaccine", "allergy",
+        "autoimmune", "plasmodium", "entamoeba", "lymphocyte",
+        "interferon", "innate immunity", "acquired immunity",
+    ],
+
+    "Microbes in Human Welfare": [
+        "fermentation", "biogas", "sewage treatment", "antibiotic",
+        "curd", "cheese", "penicillin", "streptococcus", "saccharomyces",
+        "biofertiliser", "biofertilizer", "rhizobium", "nitrobacter",
+        "lactobacillus", "toddy", "swiss cheese", "statin",
+    ],
+
+    "Biotechnology: Principles and Processes": [
+        "recombinant dna", "restriction enzyme", "cloning vector", "pcr",
+        "gene cloning", "bioreactor", "competent host",
+        "downstream processing", "ti plasmid", "restriction endonuclease",
+        "origin of replication", "selectable marker", "electroporation",
+        "gene gun", "biolistics", "ligase", "palindromic",
+    ],
+
+    "Biotechnology and its Applications": [
+        "bt cotton", "bt toxin", "gm crop", "genetically modified crop",
+        "gene therapy", "ada deficiency", "transgenic", "insulin",
+        "humulin", "molecular diagnosis", "elisa", "golden rice", "rnai",
+        "flavr savr", "bollworm", "cry protein", "transgenic animal",
+    ],
+
+    "Organisms and Populations": [
+        "population growth", "carrying capacity", "logistic growth",
+        "birth rate", "death rate", "age pyramid", "population density",
+        "hibernation", "aestivation", "commensalism", "mutualism",
+        "parasitism", "predation", "niche", "habitat",
+        "population interaction", "exponential growth",
+    ],
+
+    "Ecosystem": [
+        "energy flow", "food chain", "food web", "trophic level",
+        "primary productivity", "decomposition", "ecological pyramid",
+        "nutrient cycling", "carbon cycle", "phosphorus cycle",
+        "standing crop", "gross primary productivity", "detritus",
+        "humification", "litter",
+    ],
+
+    "Biodiversity and Conservation": [
+        "biodiversity", "species richness", "biodiversity hotspot",
+        "endangered species", "extinction", "iucn", "red data book",
+        "in-situ conservation", "in situ conservation",
+        "ex-situ conservation", "ex situ conservation", "sacred grove",
+        "western ghats", "biosphere reserve",
+    ],
+}
+
+
+def keyword_chapter_scores(text):
+
+    lower = str(
+        text or ""
+    ).lower()
+
+    scores = {}
+
+    for chapter, words in CHAPTER_KEYWORDS.items():
+
+        count = sum(
+            1
+            for word in words
+            if word in lower
+        )
+
+        if count:
+            scores[chapter] = count
+
+    return scores
+
+
+def resolve_chapter_with_keyword_hint(
+    text,
+    embedding_chapter
+):
+    """
+    Trusts the embedding-based chapter UNLESS the keyword
+    signal clearly points somewhere else and is stronger
+    there than at the embedding chapter, by a margin of at
+    least 2 -- a small margin is treated as noise.
+    """
+
+    scores = keyword_chapter_scores(
+        text
+    )
+
+    if not scores:
+        return embedding_chapter
+
+    best_chapter = max(
+        scores,
+        key=scores.get
+    )
+
+    best_score = scores[best_chapter]
+
+    embedding_score = scores.get(
+        embedding_chapter,
+        0
+    )
+
+    if (
+        best_chapter != embedding_chapter
+        and best_score >= embedding_score + 2
+    ):
+
+        return best_chapter
+
+    return embedding_chapter
 
 
 # =========================================================
@@ -1447,6 +1819,41 @@ def extract_pdf_questions(
 
 
     # =====================================================
+    # ANSWER KEYS (must be read BEFORE stripping)
+    #
+    # extract_answer_key() looks for "Correct Answer: (X)"
+    # lines. strip_answer_blocks() removes exactly those
+    # lines (so they never leak into the displayed question)
+    # -- so the answer key has to be captured from the raw,
+    # pre-strip blocks first, then matched back onto the
+    # cleaned blocks by question number.
+    # =====================================================
+
+    raw_blocks = split_question_blocks(
+        full_text
+    )
+
+    answer_keys_by_number = {}
+
+    for raw_item in raw_blocks:
+
+        raw_options = extract_options(
+            raw_item["block"]
+        )
+
+        key = extract_answer_key(
+            raw_item["block"],
+            raw_options
+        )
+
+        if key:
+
+            answer_keys_by_number[
+                raw_item["number"]
+            ] = key
+
+
+    # =====================================================
     # STRIP PROVIDED ANSWERS
     # =====================================================
 
@@ -1488,6 +1895,10 @@ def extract_pdf_questions(
             "block"
         ]
 
+        block = truncate_at_page_footer(
+            block
+        )
+
 
         marks = extract_marks(
             block
@@ -1496,6 +1907,12 @@ def extract_pdf_questions(
 
         options = extract_options(
             block
+        )
+
+
+        answer_key = answer_keys_by_number.get(
+            item["number"],
+            ""
         )
 
 
@@ -1530,6 +1947,13 @@ def extract_pdf_questions(
             continue
 
 
+        if contains_solved_answer_artifacts(
+            block
+        ):
+
+            continue
+
+
         # MCQ must have 4 usable options.
         if (
             question_type == "MCQ"
@@ -1552,6 +1976,9 @@ def extract_pdf_questions(
 
                 "options":
                     options,
+
+                "answer_key":
+                    answer_key,
 
                 "marks":
                     marks,
@@ -2171,6 +2598,11 @@ def build_question_bank(force_rebuild=False):
             ],
             embeddings,
             chapter_index
+        )
+
+        chapter = resolve_chapter_with_keyword_hint(
+            item["question"] + " " + " ".join(item.get("options") or []),
+            chapter
         )
 
 

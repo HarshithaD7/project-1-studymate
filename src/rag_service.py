@@ -1,7 +1,32 @@
 import os
+import time
 from functools import lru_cache
 
+# Must be set before huggingface_hub is ever imported anywhere in
+# the process (even transitively) -- it reads HF_HUB_OFFLINE into
+# a fixed constant at import time, so setting it later (e.g. inside
+# get_embeddings(), right before instantiating HuggingFaceEmbeddings)
+# is too late to have any effect. Skips the network "check for
+# updates" call that was adding ~90s to loading an already-cached
+# local model. get_embeddings() below removes this if the model
+# turns out not to be cached yet, so a genuinely first-ever run
+# still works (just slower, while it downloads).
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 from dotenv import load_dotenv
+
+
+def _log_timing(label, seconds):
+    # Temporary diagnostic logging -- prints to the terminal
+    # running `streamlit run`, not the browser. Evaluation is
+    # taking 1+ minutes with no errors even after switching to a
+    # fast non-reasoning model, which doesn't match normal LLM or
+    # retrieval latency. These prints pin down exactly which step
+    # (embedding-model load, Chroma retrieval, or the Groq call
+    # itself) is actually consuming the time, instead of guessing
+    # further. Safe to remove once the real bottleneck is found.
+    print(f"[BioAssist timing] {label}: {seconds:.2f}s")
 
 # NOTE: langchain_chroma / langchain_huggingface / langchain_groq
 # are imported lazily, inside the functions that need them
@@ -46,17 +71,56 @@ load_dotenv(
 @lru_cache(maxsize=1)
 def get_embeddings():
 
+    _start = time.time()
+
     from langchain_huggingface import HuggingFaceEmbeddings
 
-    return HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={
-            "device": "cpu"
-        },
-        encode_kwargs={
-            "normalize_embeddings": True
-        }
-    )
+    # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are set at the top of
+    # this module (before this import ever runs anywhere in the
+    # process) to skip the network "check for updates" call that
+    # was adding ~90s to loading an already-cached local model.
+    # If the model somehow isn't cached yet, this raises and the
+    # except-block below retries with network access allowed.
+    try:
+
+        result = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={
+                "device": "cpu"
+            },
+            encode_kwargs={
+                "normalize_embeddings": True
+            }
+        )
+
+    except Exception as error:
+
+        print(
+            "Offline-mode embeddings load failed "
+            f"(model may not be cached locally yet): {error}\n"
+            "Retrying with network access allowed -- this one "
+            "load may be slow while it downloads."
+        )
+
+        os.environ.pop("HF_HUB_OFFLINE", None)
+        os.environ.pop("TRANSFORMERS_OFFLINE", None)
+
+        result = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={
+                "device": "cpu"
+            },
+            encode_kwargs={
+                "normalize_embeddings": True
+            }
+        )
+
+    # lru_cache means this body only runs once per process -- if
+    # this print appears on every evaluation (not just the first),
+    # caching is not behaving as expected.
+    _log_timing("get_embeddings() model load (first call only)", time.time() - _start)
+
+    return result
 
 
 # =========================================================
@@ -80,10 +144,37 @@ def get_llm():
         )
 
     return ChatGroq(
+        # Switched to openai/gpt-oss-20b earlier (Groq's suggested
+        # replacement ahead of llama-3.1-8b-instant's 2026-08-16
+        # deprecation), but that made things WORSE: gpt-oss-20b is
+        # a reasoning model -- by default it generates a hidden
+        # internal "thinking" pass before every answer, and that
+        # reasoning generation consumes real time and eats into
+        # the token budget on every single call, regardless of how
+        # short the final JSON is (console.groq.com/docs/reasoning).
+        # That's a bad fit for a short structured-output grading
+        # task that needs to be fast every time.
+        #
+        # llama-3.1-8b-instant is still fully live today (checked
+        # console.groq.com/docs/models directly -- listed as a
+        # Production model at full speed, not yet actually shut
+        # down) and is a plain non-reasoning "instant" model, which
+        # is what this app actually needs. Using it until the
+        # 2026-08-16 shutdown; revisit before then (candidates at
+        # that point: gpt-oss-20b with reasoning_effort="low" to
+        # cut the reasoning overhead, or qwen/qwen3.6-27b with
+        # reasoning_effort="none").
         model="llama-3.1-8b-instant",
         temperature=0.2,
         max_tokens=700,
-        groq_api_key=api_key
+        groq_api_key=api_key,
+        # Bounds worst-case latency: one attempt, 20s to fail, one
+        # retry, 20s to fail again -- under a minute before
+        # evaluate_answer()'s existing except-block returns a
+        # clean error instead of hanging indefinitely (there was
+        # no timeout configured before this at all).
+        timeout=20,
+        max_retries=1
     )
 
 
@@ -115,6 +206,8 @@ def load_chapter_db(
     chapter
 ):
 
+    _start = time.time()
+
     from langchain_chroma import Chroma
 
     class_folder = get_class_folder(
@@ -140,10 +233,16 @@ def load_chapter_db(
 
         return None
 
-    return Chroma(
+    result = Chroma(
         persist_directory=db_path,
         embedding_function=get_embeddings()
     )
+
+    # Cached per (class, chapter) -- should only print once per
+    # chapter per process, not on every evaluation for that chapter.
+    _log_timing(f"load_chapter_db({chapter}) (first call only)", time.time() - _start)
+
+    return result
 
 
 # =========================================================
@@ -167,10 +266,19 @@ def retrieve_ncert(
 
     try:
 
-        return db.similarity_search(
+        _start = time.time()
+
+        result = db.similarity_search(
             question,
             k=k
         )
+
+        # Runs on EVERY evaluation/question-generation call, not
+        # just the first -- this is the one to watch if the other
+        # two only print once.
+        _log_timing("retrieve_ncert() similarity_search (every call)", time.time() - _start)
+
+        return result
 
     except Exception as error:
 
@@ -180,6 +288,51 @@ def retrieve_ncert(
         )
 
         return []
+
+
+# =========================================================
+# EXPLANATION LEVEL
+#
+# The retrieved NCERT context always comes from the actual
+# Class 12 chapter (source of truth never changes). What
+# changes here is how simply the LLM is asked to explain
+# that same content, based on the student's demonstrated
+# capacity (see progress_tracker.suggest_explanation_level).
+# =========================================================
+
+EXPLANATION_LEVEL_INSTRUCTIONS = {
+
+    "Class 8": """
+Explain this at a Class 8 level.
+Use simple, everyday language and short sentences.
+Avoid heavy biological/technical terminology. If a technical
+term is essential, briefly explain it in plain words the
+first time it is used.
+Focus on the core idea rather than exam-level depth.
+""",
+
+    "Class 10": """
+Explain this at a Class 10 level.
+Use moderately simple language. Standard biology terms can
+be used, but briefly explain each one.
+Give a clear, structured explanation without the full
+Class 12 exam-level technical depth.
+""",
+
+    "Class 12": """
+Explain this at full Class 12 NCERT depth.
+Use accurate Class 12 biological terminology, structured for
+exam preparation.
+"""
+}
+
+
+def get_explanation_level_instruction(explanation_level):
+
+    return EXPLANATION_LEVEL_INSTRUCTIONS.get(
+        explanation_level,
+        EXPLANATION_LEVEL_INSTRUCTIONS["Class 12"]
+    )
 
 
 # =========================================================
@@ -209,7 +362,8 @@ def build_context(
 def answer_question(
     question,
     selected_class,
-    chapter
+    chapter,
+    explanation_level="Class 12"
 ):
 
     docs = retrieve_ncert(
@@ -232,6 +386,10 @@ def answer_question(
         max_chars_per_chunk=1200
     )
 
+    level_instruction = get_explanation_level_instruction(
+        explanation_level
+    )
+
     prompt = f"""
 You are BioAssist AI, an NCERT Biology learning assistant.
 
@@ -249,11 +407,17 @@ NCERT CONTEXT:
 STUDENT QUESTION:
 {question}
 
+EXPLANATION LEVEL:
+{explanation_level}
+
+{level_instruction}
+
 RULES:
 
 1. Answer only from the retrieved NCERT content.
 2. Stay within the selected class and chapter.
-3. Explain in simple student-friendly language.
+3. Explain in simple student-friendly language, matched to
+   the EXPLANATION LEVEL above.
 4. Keep the answer concise but complete.
 5. Do not invent information.
 6. Do not use outside knowledge.

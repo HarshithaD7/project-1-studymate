@@ -738,10 +738,6 @@ if __name__ == "__main__":
     )
 
     vectorize_ncert(
-        "class_11"
-    )
-
-    vectorize_ncert(
         "class_12"
     )
 
