@@ -717,6 +717,28 @@ properly developed explanation.
 
 A response containing only one or two short points must
 not receive full marks even if those points are correct.
+""",
+
+        "Critical Thinking": """
+This is an applied-reasoning / critical-thinking question,
+NOT a fact-recall question. Do not grade it the way you would
+grade a definition question.
+
+Instead of checking whether the student restated isolated
+NCERT facts, check whether the student:
+
+1. Correctly identified the underlying biological mechanism
+   or cause-and-effect relationship behind the scenario.
+2. Logically connected the relevant NCERT concepts needed to
+   explain it (not just named one isolated fact in passing).
+3. Reached a scientifically sound conclusion or consequence
+   for the scenario described in the question.
+
+A student who states one correct isolated fact but never
+explains the reasoning chain or the resulting consequence
+should NOT receive full marks. A student who reasons through
+the scenario correctly should score well even if their
+wording differs noticeably from the model answer.
 """
     }
 
@@ -873,6 +895,43 @@ def apply_answer_depth_cap(
             )
 
 
+    # -----------------------------------------------------
+    # CRITICAL THINKING
+    #
+    # Same word-count floor as a 4-mark answer -- these are
+    # evaluated for reasoning quality above, but a one-line
+    # response still can't contain a real cause-and-effect
+    # explanation, so it shouldn't be able to score full marks
+    # on length alone either.
+    # -----------------------------------------------------
+
+    elif question_level == "Critical Thinking":
+
+        if word_count < 15:
+            return min(
+                score,
+                4
+            )
+
+        if word_count < 30:
+            return min(
+                score,
+                6
+            )
+
+        if word_count < 45:
+            return min(
+                score,
+                8
+            )
+
+        if word_count < 55:
+            return min(
+                score,
+                9
+            )
+
+
     return score
 
 
@@ -890,7 +949,11 @@ def get_max_marks(
         "2 Mark": 2,
         "3 Mark": 3,
         "4 Mark": 4,
-        "5 Mark": 5
+        "5 Mark": 5,
+        # CBSE HOTS/applied-reasoning questions are most
+        # commonly worth 3-4 marks on real papers -- 4 reflects
+        # that without overlapping the plain 5-mark tier.
+        "Critical Thinking": 4
     }
 
     return mapping.get(
@@ -1184,6 +1247,43 @@ def evaluate_answer(
 
 
     # =====================================================
+    # CRITICAL THINKING: REASONING SUB-SCORES + SOCRATIC NUDGE
+    #
+    # Only Critical Thinking questions get these extra fields --
+    # every other level keeps its original JSON shape untouched,
+    # so this cannot change MCQ/mark-based scoring behavior.
+    # =====================================================
+
+    reasoning_rule_text = ""
+    reasoning_json_fields = ""
+
+    if question_level == "Critical Thinking":
+
+        reasoning_rule_text = """
+18. Since this is a Critical Thinking question, ALSO return three
+    0-10 sub-scores that break down the reasoning quality:
+    - "concept_identification": did the student name the correct
+      underlying biological concept(s) needed for this scenario?
+    - "mechanism_explanation": did the student explain HOW/WHY it
+      happens (the causal chain), not just WHAT happens?
+    - "conclusion_validity": is the student's final conclusion or
+      predicted consequence scientifically sound?
+
+19. ALSO return "socratic_prompt": ONE short guiding question
+    (never the answer itself) that would nudge the student toward
+    whatever they missed. If the answer is already excellent,
+    return "" for this field.
+"""
+
+        reasoning_json_fields = """,
+    "concept_identification": 0,
+    "mechanism_explanation": 0,
+    "conclusion_validity": 0,
+    "socratic_prompt": ""
+"""
+
+
+    # =====================================================
     # MARK-DEPTH SCORING RULES
     # =====================================================
 
@@ -1199,6 +1299,11 @@ def evaluate_answer(
 
 11. A 2-mark answer should normally contain around two
     important relevant ideas/points.
+
+11a. For a Critical Thinking / Applied Reasoning question,
+     do not award high marks for stating an isolated correct
+     fact without explaining the underlying mechanism or
+     cause-and-effect chain that connects it to the scenario.
 """
 
 
@@ -1290,7 +1395,7 @@ SCORING RULES:
     Biology terms that would strengthen the student's answer.
 
 17. Keep feedback understandable to a school student.
-
+{reasoning_rule_text}
 Return ONLY valid JSON:
 
 {{
@@ -1299,7 +1404,7 @@ Return ONLY valid JSON:
     "missing_points": [],
     "missing_keywords": [],
     "improvement": "",
-    "model_answer": ""
+    "model_answer": ""{reasoning_json_fields}
 }}
 """
 
@@ -1439,6 +1544,51 @@ Return ONLY valid JSON:
         )
 
 
+        # =================================================
+        # REASONING BREAKDOWN (Critical Thinking only)
+        # =================================================
+
+        reasoning_breakdown = None
+        socratic_prompt = ""
+
+        if question_level == "Critical Thinking":
+
+            def _sub_score(key):
+
+                try:
+
+                    return max(
+                        0,
+                        min(
+                            10,
+                            int(round(float(parsed.get(key, 0))))
+                        )
+                    )
+
+                except Exception:
+
+                    return 0
+
+            reasoning_breakdown = {
+                "concept_identification":
+                    _sub_score("concept_identification"),
+                "mechanism_explanation":
+                    _sub_score("mechanism_explanation"),
+                "conclusion_validity":
+                    _sub_score("conclusion_validity")
+            }
+
+            socratic_prompt = str(
+                parsed.get("socratic_prompt", "")
+            ).strip()
+
+            # A socratic nudge only makes sense when something
+            # was actually missing -- don't show one alongside a
+            # score that's already effectively perfect.
+            if score >= 9:
+                socratic_prompt = ""
+
+
         return {
             "score":
                 score,
@@ -1464,7 +1614,13 @@ Return ONLY valid JSON:
                 improvement,
 
             "model_answer":
-                model_answer
+                model_answer,
+
+            "reasoning_breakdown":
+                reasoning_breakdown,
+
+            "socratic_prompt":
+                socratic_prompt
         }
 
 

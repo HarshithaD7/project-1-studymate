@@ -106,6 +106,29 @@ Generate ONE 5-mark Biology question.
 
 The expected answer should require a detailed,
 well-structured NCERT-grounded explanation.
+""",
+
+        "Critical Thinking": """
+Generate ONE applied-reasoning Biology question -- NOT a
+recall or definition question.
+
+Present a short biological scenario, situation, or
+perturbation (something that happens to an organism,
+process, or system) that is directly explainable using the
+retrieved NCERT context below, and ask the student to reason
+out the underlying mechanism, cause, or consequence.
+
+Do NOT ask "What is X" or "Define X" or "Name the X". Instead
+ask things like "What happens when...", "Why does...",
+"Explain why...", "Predict what would happen if...", framed
+around a concrete situation, not an abstract definition.
+
+The question must still be answerable ONLY using the concepts
+in the supplied NCERT context -- do not require outside
+medical/clinical knowledge beyond what NCERT Biology covers,
+and do not invent scenario details unsupported by the context.
+
+Set "options" to an empty array.
 """
     }
 
@@ -505,5 +528,236 @@ Return exactly:
             "question": "",
             "options": [],
             "answer": "",
+            "error": str(error)
+        }
+
+
+# =========================================================
+# CASE STUDY / DIFFERENTIAL-DIAGNOSIS GENERATOR
+#
+# One NCERT-grounded scenario followed by 3 escalating
+# questions -- immediate effect, underlying mechanism,
+# predicted consequence -- the same "symptom -> mechanism ->
+# most likely cause" reasoning chain used in a clinical
+# differential diagnosis, applied to Biology concepts. Each
+# step is graded through the existing Critical Thinking
+# rubric in answer_evaluator.py, so this function only needs
+# to produce the scenario + questions + reference answers in
+# a single LLM call.
+# =========================================================
+
+def generate_case_study(
+    selected_class,
+    chapter
+):
+
+    docs = retrieve_ncert(
+        chapter,
+        selected_class,
+        chapter,
+        k=6
+    )
+
+    if not docs:
+
+        return {
+            "scenario": "",
+            "steps": [],
+            "error":
+                "No NCERT evidence was found for the selected chapter."
+        }
+
+    docs = list(
+        docs
+    )
+
+    sample_size = min(
+        4,
+        len(docs)
+    )
+
+    selected_docs = random.sample(
+        docs,
+        sample_size
+    )
+
+    context_parts = []
+
+    for doc in selected_docs:
+
+        page_content = getattr(
+            doc,
+            "page_content",
+            ""
+        )
+
+        if page_content:
+
+            context_parts.append(
+                page_content[:1400]
+            )
+
+    context = "\n\n".join(
+        context_parts
+    )
+
+    if not context.strip():
+
+        return {
+            "scenario": "",
+            "steps": [],
+            "error":
+                "Retrieved NCERT documents did not contain readable content."
+        }
+
+    prompt = f"""
+You are BioAssist AI, building a case-study style critical-
+thinking exercise for a Class 12 Biology student.
+
+CLASS:
+{selected_class}
+
+CHAPTER:
+{chapter}
+
+RETRIEVED NCERT CONTEXT:
+
+{context}
+
+TASK:
+
+1. Write ONE short biological scenario or situation (2-3
+   sentences) built ONLY from concepts in the retrieved
+   context above -- something happening to an organism,
+   process, or system (a perturbation, injury, environmental
+   change, or unusual condition).
+
+2. Write exactly THREE questions about that SAME scenario,
+   escalating like a differential-diagnosis reasoning chain:
+   - Step 1: what is the immediate/observable effect?
+   - Step 2: what is the underlying biological mechanism that
+     causes it (the "why", not just the "what")?
+   - Step 3: what is the likely further consequence or outcome
+     (e.g. what would happen next, or what would change the
+     outcome)?
+
+3. Each question must be answerable ONLY from the supplied
+   NCERT context -- do not require outside clinical knowledge
+   beyond what NCERT Biology covers, and do not invent details
+   unsupported by the context.
+
+4. For each step, also give a concise NCERT-grounded reference
+   answer.
+
+5. Do not ask for definitions ("what is X") -- every step must
+   require reasoning about the scenario, not fact recall.
+
+Return ONLY valid JSON in exactly this shape:
+
+{{
+    "scenario": "",
+    "steps": [
+        {{"question": "", "expected_answer": ""}},
+        {{"question": "", "expected_answer": ""}},
+        {{"question": "", "expected_answer": ""}}
+    ]
+}}
+"""
+
+    try:
+
+        response = get_llm().invoke(
+            prompt
+        )
+
+        parsed = parse_json_response(
+            response.content
+        )
+
+        if not parsed:
+
+            return {
+                "scenario": "",
+                "steps": [],
+                "error":
+                    "Unable to parse the generated case study."
+            }
+
+        scenario = str(
+            parsed.get(
+                "scenario",
+                ""
+            )
+        ).strip()
+
+        raw_steps = parsed.get(
+            "steps",
+            []
+        )
+
+        if not isinstance(
+            raw_steps,
+            list
+        ):
+
+            raw_steps = []
+
+        steps = []
+
+        for raw_step in raw_steps:
+
+            if not isinstance(
+                raw_step,
+                dict
+            ):
+                continue
+
+            step_question = str(
+                raw_step.get(
+                    "question",
+                    ""
+                )
+            ).strip()
+
+            step_answer = str(
+                raw_step.get(
+                    "expected_answer",
+                    ""
+                )
+            ).strip()
+
+            if step_question:
+
+                steps.append(
+                    {
+                        "question": step_question,
+                        "expected_answer": step_answer
+                    }
+                )
+
+        if not scenario or len(steps) < 3:
+
+            return {
+                "scenario": "",
+                "steps": [],
+                "error":
+                    "BioAssist did not generate a complete case "
+                    "study. Please try again."
+            }
+
+        # Keep exactly 3 steps even if the model returned extra.
+        steps = steps[:3]
+
+        return {
+            "scenario": scenario,
+            "steps": steps,
+            "error": ""
+        }
+
+    except Exception as error:
+
+        return {
+            "scenario": "",
+            "steps": [],
             "error": str(error)
         }

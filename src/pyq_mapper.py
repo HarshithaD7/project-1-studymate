@@ -315,6 +315,63 @@ def get_questions_for_chapter(
 
 
 # =========================================================
+# CRITICAL THINKING / HOTS DETECTION
+#
+# CBSE board papers already include applied-reasoning
+# ("Higher Order Thinking Skills") questions alongside plain
+# recall ones -- they're just mixed into the same pool with
+# no dedicated tag. Rather than asking an LLM to classify
+# every question (slow, and another source of Groq rate-limit
+# pressure per the project's PYQ-processing constraints), this
+# is a local phrase heuristic: it looks for the wording pattern
+# CBSE actually uses for scenario/cause-effect questions, not
+# definition/recall wording ("what is", "define", "name the").
+# =========================================================
+
+CRITICAL_THINKING_PATTERN = re.compile(
+    r"what (would|will) happen"
+    r"|what happens (when|if)"
+    r"|why (does|do|is|are|would|did)"
+    r"|explain why"
+    r"|give (a |one )?reason"
+    r"|justify"
+    r"|account for"
+    r"|predict"
+    r"|what (is|are|would be) the (effect|consequence|result|outcome)"
+    r"|comment on"
+    r"|suggest (a |one )?reason",
+    re.IGNORECASE
+)
+
+
+def is_critical_thinking_question(
+    question_text
+):
+
+    return bool(
+        CRITICAL_THINKING_PATTERN.search(
+            str(question_text or "")
+        )
+    )
+
+
+def filter_critical_thinking_questions(
+    questions
+):
+
+    return [
+        item
+        for item in questions
+        if is_critical_thinking_question(
+            item.get(
+                "question",
+                ""
+            )
+        )
+    ]
+
+
+# =========================================================
 # MARK GROUP
 # =========================================================
 

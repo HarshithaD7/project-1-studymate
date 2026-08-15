@@ -11,7 +11,8 @@ from chatbot_utility import get_chapter_list
 from rag_service import answer_question
 
 from question_generator import (
-    generate_evaluation_question
+    generate_evaluation_question,
+    generate_case_study
 )
 
 from answer_evaluator import evaluate_answer
@@ -19,13 +20,17 @@ from answer_evaluator import evaluate_answer
 from pyq_mapper import (
     get_questions_for_chapter,
     group_questions_by_marks,
-    get_question_counts
+    get_question_counts,
+    filter_critical_thinking_questions
 )
 
 from progress_tracker import (
     save_progress,
     get_progress,
-    suggest_explanation_level
+    suggest_explanation_level,
+    get_chapter_mastery,
+    get_skill_breakdown,
+    mastery_label
 )
 
 
@@ -390,6 +395,7 @@ st.markdown(
     .feedback-card.negative { border-left: 4px solid var(--warning); }
     .feedback-card.keywords { border-left: 4px solid var(--purple); }
     .feedback-card.improve  { border-left: 4px solid var(--accent); }
+    .feedback-card.socratic { border-left: 4px solid var(--gold); }
 
     .feedback-card .fc-title {
         font-weight: 700;
@@ -611,30 +617,31 @@ st.markdown(
     }
 
     /* ===================================================
-       LEVEL PILL ROW (main content, mirrors sidebar choice)
+       LEVEL PILL ROW (main content, clickable, mirrors +
+       drives the same session_state key as the sidebar radio)
+       -------------------------------------------------
+       Real st.button elements scoped via st.container(key=
+       "level_pill_row") -> Streamlit renders that as a wrapper
+       div with class "st-key-level_pill_row". Compacted here
+       into a pill shape; active/inactive color already comes
+       for free from the existing button[kind="primary"/
+       "secondary"] overrides defined earlier in this stylesheet.
        =================================================== */
 
-    .level-pill-row {
-        display: flex;
-        gap: 0.5rem;
+    .st-key-level_pill_row {
         margin-bottom: 1rem;
-        flex-wrap: wrap;
     }
 
-    .level-pill {
-        padding: 0.4rem 0.9rem;
-        border-radius: 8px;
-        border: 1px solid var(--line);
-        font-size: 0.85rem;
-        font-weight: 600;
-        opacity: 0.65;
+    .st-key-level_pill_row div[data-testid="stHorizontalBlock"] {
+        gap: 0.5rem;
     }
 
-    .level-pill.active {
-        opacity: 1;
-        background: var(--accent);
-        color: #062712;
-        border-color: var(--accent);
+    .st-key-level_pill_row button {
+        padding: 0.35rem 0.6rem !important;
+        min-height: unset !important;
+        border-radius: 8px !important;
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
     }
 
     /* ===================================================
@@ -933,7 +940,14 @@ defaults = {
     "practice_explanation_docs": [],
     "practice_last_pyq_key": None,
     "last_practice_context": None,
-    "questions_attempted_session": 0
+    "questions_attempted_session": 0,
+
+    # Case Study (Capstone 2): one scenario, 3 escalating steps.
+    "case_study_data": None,
+    "case_study_id": 0,
+    "case_study_step": 0,
+    "case_study_results": {},
+    "case_study_context": None
 }
 
 for key, value in defaults.items():
@@ -951,12 +965,26 @@ for key, value in defaults.items():
 # top banner.
 # =========================================================
 
-def _on_level_change():
+def _on_level_change(level=None):
 
-    # Widget-bound key ("practice_level") already updated by
-    # Streamlit at this point -- just clear out the question
-    # that belonged to the previous level so a stale question
-    # never shows under the new tab.
+    # Two call sites share this callback:
+    # 1. The sidebar radio's on_change -- Streamlit has already
+    #    updated the widget-bound "practice_level" key by the
+    #    time this runs, so level stays None and nothing extra
+    #    is set here.
+    # 2. The clickable pill buttons in the main content area --
+    #    they pass their own level explicitly via on_click's
+    #    args=(level,). Setting session_state here is safe
+    #    because callbacks run BEFORE the script reruns, i.e.
+    #    before the sidebar radio (same key) is re-instantiated
+    #    -- this is the documented-safe pattern, not a
+    #    post-widget-creation mutation.
+
+    if level is not None:
+        st.session_state.practice_level = level
+
+    # Clear out the question that belonged to the previous
+    # level so a stale question never shows under the new tab.
 
     st.session_state.practice_question_data = None
     st.session_state.practice_result = None
@@ -1020,6 +1048,7 @@ with st.sidebar:
         "Mode",
         [
             "✏️ Practice",
+            "🧬 Case Study",
             "📊 My Progress"
         ],
         label_visibility="collapsed"
@@ -1040,7 +1069,8 @@ with st.sidebar:
                 "2 Mark",
                 "3 Mark",
                 "4 Mark",
-                "5 Mark"
+                "5 Mark",
+                "Critical Thinking"
             ],
             key="practice_level",
             on_change=_on_level_change,
@@ -1126,7 +1156,8 @@ if (
 def save_progress_safely(
     activity,
     topic,
-    score=None
+    score=None,
+    question_level=None
 ):
 
     try:
@@ -1149,7 +1180,8 @@ def save_progress_safely(
                 chapter,
                 activity,
                 topic,
-                score
+                score,
+                question_level=question_level
             )
 
     except Exception as error:
@@ -1268,15 +1300,36 @@ if mode == "✏️ Practice":
     # <span> readout, not another Streamlit widget, to avoid any
     # duplicate-key or widget-state conflicts.
 
-    pills_html = "".join(
-        f'<span class="level-pill{" active" if lvl == practice_level else ""}">{lvl}</span>'
-        for lvl in ["MCQ", "1 Mark", "2 Mark", "3 Mark", "4 Mark", "5 Mark"]
-    )
+    # Real, clickable buttons -- not a second radio widget, so
+    # there's no "practice_level" key collision with the sidebar
+    # radio. Each button's on_click sets the SAME session_state
+    # key via the shared _on_level_change callback (safe: callbacks
+    # run before the rerun, i.e. before the sidebar radio with
+    # that key is re-instantiated), so clicking a pill here also
+    # updates the sidebar selection, and vice versa -- one shared
+    # source of truth either way.
 
-    st.markdown(
-        f'<div class="level-pill-row">{pills_html}</div>',
-        unsafe_allow_html=True
-    )
+    with st.container(
+        key="level_pill_row"
+    ):
+
+        pill_cols = st.columns(7)
+
+        for pill_col, lvl in zip(
+            pill_cols,
+            ["MCQ", "1 Mark", "2 Mark", "3 Mark", "4 Mark", "5 Mark", "Critical Thinking"]
+        ):
+
+            with pill_col:
+
+                st.button(
+                    lvl,
+                    key=f"level_pill_{lvl}",
+                    type="primary" if lvl == practice_level else "secondary",
+                    on_click=_on_level_change,
+                    args=(lvl,),
+                    use_container_width=True
+                )
 
 
     # =====================================================
@@ -1324,40 +1377,56 @@ if mode == "✏️ Practice":
 
         except Exception:
 
+            attemptable_questions = []
             grouped = {}
 
-        pool = (
-            grouped.get(
-                LEVEL_KEY_MAP.get(level, ""),
-                []
+        # Critical Thinking has no marks-bucket of its own --
+        # it's a phrase-heuristic scan across every attemptable
+        # question in the chapter (see filter_critical_thinking_
+        # questions in pyq_mapper.py) rather than a marks group,
+        # since real scenario/HOTS questions can carry any marks
+        # value on the actual paper.
+
+        if level == "Critical Thinking":
+
+            pool = filter_critical_thinking_questions(
+                attemptable_questions
             )
-            if grouped
-            else []
-        )
 
-        # The "1" marks bucket contains both real MCQs and
-        # plain 1-mark short-answer questions mixed together.
-        # Now that MCQ and 1 Mark are separate tabs, split the
-        # bucket by the record's actual question_type so each
-        # tab only ever gets the kind of question it promises.
+        else:
 
-        if level == "MCQ":
+            pool = (
+                grouped.get(
+                    LEVEL_KEY_MAP.get(level, ""),
+                    []
+                )
+                if grouped
+                else []
+            )
 
-            pool = [
-                item
-                for item in pool
-                if str(item.get("question_type", "")).strip()
-                == "MCQ"
-            ]
+            # The "1" marks bucket contains both real MCQs and
+            # plain 1-mark short-answer questions mixed together.
+            # Now that MCQ and 1 Mark are separate tabs, split the
+            # bucket by the record's actual question_type so each
+            # tab only ever gets the kind of question it promises.
 
-        elif level == "1 Mark":
+            if level == "MCQ":
 
-            pool = [
-                item
-                for item in pool
-                if str(item.get("question_type", "")).strip()
-                != "MCQ"
-            ]
+                pool = [
+                    item
+                    for item in pool
+                    if str(item.get("question_type", "")).strip()
+                    == "MCQ"
+                ]
+
+            elif level == "1 Mark":
+
+                pool = [
+                    item
+                    for item in pool
+                    if str(item.get("question_type", "")).strip()
+                    != "MCQ"
+                ]
 
         if pool:
 
@@ -1678,7 +1747,8 @@ if mode == "✏️ Practice":
                         save_progress_safely(
                             "Answer Evaluation",
                             label,
-                            evaluation.get("score", 0)
+                            evaluation.get("score", 0),
+                            question_level=internal_level
                         )
 
 
@@ -1756,7 +1826,8 @@ if mode == "✏️ Practice":
                         save_progress_safely(
                             "Answer Evaluation",
                             label,
-                            evaluation.get("score", 0)
+                            evaluation.get("score", 0),
+                            question_level=internal_level
                         )
 
 
@@ -1933,6 +2004,60 @@ if mode == "✏️ Practice":
                 """,
                 unsafe_allow_html=True
             )
+
+
+            # =============================================
+            # CRITICAL THINKING: REASONING BREAKDOWN +
+            # SOCRATIC NUDGE
+            #
+            # Only present when evaluate_answer() was called
+            # with question_level="Critical Thinking" -- every
+            # other level's evaluation dict simply won't have
+            # these keys, so this whole block is a no-op there.
+            # =============================================
+
+            reasoning_breakdown = evaluation.get(
+                "reasoning_breakdown"
+            )
+
+            if reasoning_breakdown:
+
+                st.markdown(
+                    f"""
+                    <div class="mini-stat-row">
+                        <div class="mini-stat">
+                            <span>🧩 Concept ID</span>
+                            <span class="ms-value">{reasoning_breakdown['concept_identification']}/10</span>
+                        </div>
+                        <div class="mini-stat">
+                            <span>⚙️ Mechanism</span>
+                            <span class="ms-value">{reasoning_breakdown['mechanism_explanation']}/10</span>
+                        </div>
+                        <div class="mini-stat">
+                            <span>🎯 Conclusion</span>
+                            <span class="ms-value">{reasoning_breakdown['conclusion_validity']}/10</span>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            socratic_prompt = evaluation.get(
+                "socratic_prompt",
+                ""
+            )
+
+            if socratic_prompt:
+
+                st.markdown(
+                    f"""
+                    <div class="feedback-card socratic">
+                        <div class="fc-title">🤔 Think About This</div>
+                        <p>{html.escape(socratic_prompt)}</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
 
             # =============================================
@@ -2193,6 +2318,437 @@ if mode == "✏️ Practice":
 
 
 # =========================================================
+# CASE STUDY (Capstone 2)
+#
+# One NCERT-grounded scenario, three escalating questions --
+# immediate effect, underlying mechanism, predicted
+# consequence -- the same "symptom -> mechanism -> likely
+# cause" chain used in a clinical differential diagnosis.
+# Each step is graded through the same Critical Thinking
+# rubric used in Practice mode, so no new evaluator code is
+# needed here -- this is a state machine + UI on top of it.
+# =========================================================
+
+elif mode == "🧬 Case Study":
+
+    st.markdown(
+        """
+        <div class="page-header">
+            <div class="page-header-left">
+                <div class="page-header-icon">🧬</div>
+                <div>
+                    <div class="page-header-title">Case Study</div>
+                    <div class="page-header-subtitle">
+                        One scenario, three escalating questions -- reason through it like a diagnosis
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        f"""
+        <div class="chapter-bar">
+            <div>
+                <div class="chapter-bar-title">📘 {html.escape(chapter)}</div>
+                <div class="chapter-bar-tags">Class 12 &bull; Biology</div>
+            </div>
+            <div class="ncert-badge">
+                <span class="nb-label">Grounded in</span>
+                NCERT Class 12
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Reset the case study only when the chapter genuinely
+    # changes -- switching modes and coming back should not
+    # lose progress on an in-progress case.
+
+    current_case_context = (
+        selected_class,
+        chapter
+    )
+
+    if st.session_state.case_study_context != current_case_context:
+
+        st.session_state.case_study_data = None
+        st.session_state.case_study_step = 0
+        st.session_state.case_study_results = {}
+        st.session_state.case_study_id += 1
+        st.session_state.case_study_context = current_case_context
+
+    case_generate_label = (
+        "Generate Case Study"
+        if not st.session_state.case_study_data
+        else "New Case Study"
+    )
+
+    if st.button(
+        case_generate_label,
+        type="primary",
+        key="fetch_case_study"
+    ):
+
+        with st.spinner(
+            "Building a case study from this chapter..."
+        ):
+
+            try:
+
+                case_result = generate_case_study(
+                    selected_class,
+                    chapter
+                )
+
+            except Exception as error:
+
+                case_result = {
+                    "scenario": "",
+                    "steps": [],
+                    "error": str(error)
+                }
+
+        if case_result.get("error"):
+
+            st.error(
+                case_result["error"]
+            )
+
+        else:
+
+            st.session_state.case_study_id += 1
+            st.session_state.case_study_data = case_result
+            st.session_state.case_study_step = 0
+            st.session_state.case_study_results = {}
+
+
+    case_data = st.session_state.case_study_data
+
+    if case_data:
+
+        scenario = case_data.get(
+            "scenario",
+            ""
+        )
+
+        steps = case_data.get(
+            "steps",
+            []
+        )
+
+        case_id = st.session_state.case_study_id
+        current_step = st.session_state.case_study_step
+        results = st.session_state.case_study_results
+
+        st.markdown(
+            f"""
+            <div class="question-card">
+                <div class="question-card-top">
+                    <span class="question-card-badge">🧬 CASE SCENARIO</span>
+                </div>
+                <div class="question-card-text">{html.escape(scenario)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        step_labels = [
+            "Immediate Effect",
+            "Mechanism",
+            "Consequence"
+        ]
+
+        def case_step_class(index):
+
+            if index < current_step:
+                return "ladder-step done"
+
+            if index == current_step:
+                return "ladder-step active"
+
+            return "ladder-step"
+
+        def case_step_num(index):
+
+            if index < current_step:
+                return "✓"
+
+            return str(index + 1)
+
+        ladder_html = "".join(
+            f'<span class="{case_step_class(i)}">'
+            f'<span class="ls-num">{case_step_num(i)}</span>'
+            f'{html.escape(step_labels[i])}</span>'
+            for i in range(len(steps))
+        )
+
+        st.markdown(
+            f'<div class="ladder-steps">{ladder_html}</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            "<div style='height:0.9rem'></div>",
+            unsafe_allow_html=True
+        )
+
+
+        def render_case_step_result(evaluation):
+
+            score = evaluation.get(
+                "score",
+                0
+            )
+
+            correct_points = evaluation.get(
+                "correct_points",
+                []
+            )
+
+            missing_points = evaluation.get(
+                "missing_points",
+                []
+            )
+
+            st.markdown(
+                f"**Score: {score}/10**"
+            )
+
+            if correct_points:
+
+                st.success(
+                    "What you got right: "
+                    + " | ".join(
+                        str(point)
+                        for point in correct_points
+                    )
+                )
+
+            if missing_points:
+
+                st.warning(
+                    "What you missed: "
+                    + " | ".join(
+                        str(point)
+                        for point in missing_points
+                    )
+                )
+
+            reasoning_breakdown = evaluation.get(
+                "reasoning_breakdown"
+            )
+
+            if reasoning_breakdown:
+
+                st.markdown(
+                    f"""
+                    <div class="mini-stat-row">
+                        <div class="mini-stat">
+                            <span>🧩 Concept ID</span>
+                            <span class="ms-value">{reasoning_breakdown['concept_identification']}/10</span>
+                        </div>
+                        <div class="mini-stat">
+                            <span>⚙️ Mechanism</span>
+                            <span class="ms-value">{reasoning_breakdown['mechanism_explanation']}/10</span>
+                        </div>
+                        <div class="mini-stat">
+                            <span>🎯 Conclusion</span>
+                            <span class="ms-value">{reasoning_breakdown['conclusion_validity']}/10</span>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            socratic_prompt = evaluation.get(
+                "socratic_prompt",
+                ""
+            )
+
+            if socratic_prompt:
+
+                st.info(
+                    f"🤔 Think about this: {socratic_prompt}"
+                )
+
+
+        if current_step < len(steps):
+
+            step = steps[current_step]
+
+            st.markdown(
+                f"""
+                <div class="question-card">
+                    <div class="question-card-top">
+                        <span class="question-card-badge">STEP {current_step + 1} OF {len(steps)}</span>
+                    </div>
+                    <div class="question-card-text">{html.escape(step.get("question", ""))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            if current_step in results:
+
+                render_case_step_result(
+                    results[current_step]
+                )
+
+                next_label = (
+                    "Next Step"
+                    if current_step + 1 < len(steps)
+                    else "See Case Summary"
+                )
+
+                if st.button(
+                    next_label,
+                    key=f"case_next_{case_id}_{current_step}"
+                ):
+
+                    st.session_state.case_study_step += 1
+
+                    st.rerun()
+
+            else:
+
+                with st.form(
+                    key=f"case_form_{case_id}_{current_step}",
+                    clear_on_submit=False
+                ):
+
+                    case_answer = st.text_area(
+                        "Your Answer",
+                        height=150,
+                        placeholder="Reason through this step, then submit.",
+                        key=f"case_answer_{case_id}_{current_step}"
+                    )
+
+                    case_submitted = st.form_submit_button(
+                        "Evaluate This Step",
+                        type="primary"
+                    )
+
+                if case_submitted:
+
+                    if not case_answer.strip():
+
+                        st.warning(
+                            "Please enter your answer."
+                        )
+
+                    else:
+
+                        with st.spinner(
+                            "Evaluating your reasoning..."
+                        ):
+
+                            try:
+
+                                step_evaluation = evaluate_answer(
+                                    step.get("question", ""),
+                                    case_answer,
+                                    selected_class,
+                                    chapter,
+                                    expected_answer=step.get("expected_answer", ""),
+                                    question_level="Critical Thinking"
+                                )
+
+                            except Exception as error:
+
+                                st.error(
+                                    f"Evaluation failed: {error}"
+                                )
+
+                                step_evaluation = None
+
+                        if step_evaluation:
+
+                            st.session_state.case_study_results[current_step] = (
+                                step_evaluation
+                            )
+
+                            st.session_state.questions_attempted_session += 1
+
+                            save_progress_safely(
+                                "Answer Evaluation",
+                                f"[Case Study] {step.get('question', '')}",
+                                step_evaluation.get("score", 0),
+                                question_level="Critical Thinking"
+                            )
+
+                            st.rerun()
+
+        else:
+
+            # All steps complete -- case summary.
+
+            all_scores = [
+                results[i].get("score", 0)
+                for i in range(len(steps))
+                if i in results
+            ]
+
+            case_average = (
+                round(sum(all_scores) / len(all_scores), 1)
+                if all_scores
+                else 0
+            )
+
+            st.markdown(
+                f"""
+                <div class="result-panel" style="--pct:{round(case_average * 10)}">
+                    <div class="score-ring">
+                        <div class="score-ring-inner">
+                            {case_average}/10
+                            <span>CASE AVG</span>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="result-headline">Case Study Complete</div>
+                        <div class="result-subtext">
+                            You reasoned through all {len(steps)} steps of this scenario.
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            for i in range(len(steps)):
+
+                if i not in results:
+                    continue
+
+                with st.expander(
+                    f"Step {i + 1}: {step_labels[i]} -- "
+                    f"{results[i].get('score', 0)}/10"
+                ):
+
+                    st.write(
+                        steps[i].get("question", "")
+                    )
+
+                    render_case_step_result(
+                        results[i]
+                    )
+
+            if st.button(
+                "Start a New Case Study",
+                key=f"case_restart_{case_id}"
+            ):
+
+                st.session_state.case_study_data = None
+                st.session_state.case_study_step = 0
+                st.session_state.case_study_results = {}
+
+                st.rerun()
+
+
+# =========================================================
 # MY PROGRESS
 # =========================================================
 
@@ -2330,6 +2886,161 @@ elif mode == "📊 My Progress":
                 "Current Level",
                 suggested_level
             )
+
+
+        # =================================================
+        # SKILL BREAKDOWN: RECALL vs CRITICAL THINKING
+        #
+        # This is the actual pedagogical payoff of Capstone 2 --
+        # showing that "knowing facts" and "applying them" are
+        # tracked as two different skills, not one blended score.
+        # =================================================
+
+        st.divider()
+
+        st.subheader(
+            "🧠 Recall vs Critical Thinking"
+        )
+
+        try:
+
+            skill_breakdown = get_skill_breakdown(
+                student
+            )
+
+        except Exception:
+
+            skill_breakdown = None
+
+        if skill_breakdown and (
+            skill_breakdown["recall_attempts"]
+            or skill_breakdown["critical_thinking_attempts"]
+        ):
+
+            skill_col1, skill_col2 = st.columns(2)
+
+            with skill_col1:
+
+                st.metric(
+                    "Recall Average (MCQ / 1-5 Mark)",
+                    (
+                        f"{skill_breakdown['recall_average']}/10"
+                        if skill_breakdown["recall_average"] is not None
+                        else "Not attempted yet"
+                    ),
+                    help=f"{skill_breakdown['recall_attempts']} question(s) attempted"
+                )
+
+            with skill_col2:
+
+                st.metric(
+                    "Critical Thinking Average",
+                    (
+                        f"{skill_breakdown['critical_thinking_average']}/10"
+                        if skill_breakdown["critical_thinking_average"] is not None
+                        else "Not attempted yet"
+                    ),
+                    help=f"{skill_breakdown['critical_thinking_attempts']} question(s) attempted"
+                )
+
+            st.caption(
+                mastery_label(
+                    skill_breakdown["recall_average"],
+                    skill_breakdown["critical_thinking_average"]
+                )
+            )
+
+        else:
+
+            st.caption(
+                "Attempt a few questions across both Practice "
+                "and Case Study to see this breakdown."
+            )
+
+
+        # =================================================
+        # PER-CHAPTER KNOWLEDGE MAP
+        #
+        # How much the student knows on each topic they've
+        # actually attempted, split the same way -- not just
+        # one flat overall average.
+        # =================================================
+
+        st.subheader(
+            "📚 Knowledge by Chapter"
+        )
+
+        try:
+
+            chapter_mastery = get_chapter_mastery(
+                student
+            )
+
+        except Exception:
+
+            chapter_mastery = []
+
+        if chapter_mastery:
+
+            for entry in chapter_mastery:
+
+                with st.container(
+                    border=True
+                ):
+
+                    mastery_col1, mastery_col2 = st.columns(
+                        [3, 1]
+                    )
+
+                    with mastery_col1:
+
+                        st.markdown(
+                            f"**{entry['chapter']}**"
+                        )
+
+                        st.caption(
+                            entry["label"]
+                        )
+
+                    with mastery_col2:
+
+                        st.markdown(
+                            f"<div style='text-align:right; font-weight:700;'>"
+                            f"{entry['overall_average']}/10</div>",
+                            unsafe_allow_html=True
+                        )
+
+                        st.caption(
+                            f"{entry['attempts']} attempt(s)"
+                        )
+
+                    detail_bits = []
+
+                    if entry["recall_average"] is not None:
+
+                        detail_bits.append(
+                            f"Recall: {entry['recall_average']}/10"
+                        )
+
+                    if entry["critical_thinking_average"] is not None:
+
+                        detail_bits.append(
+                            f"Critical Thinking: {entry['critical_thinking_average']}/10"
+                        )
+
+                    if detail_bits:
+
+                        st.caption(
+                            " &nbsp;•&nbsp; ".join(detail_bits)
+                        )
+
+        else:
+
+            st.caption(
+                "No chapter-level activity recorded yet."
+            )
+
+        st.divider()
 
 
         # =================================================
