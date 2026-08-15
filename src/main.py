@@ -35,6 +35,21 @@ from progress_tracker import (
 
 
 # =========================================================
+# CAPSTONE 2 FEATURE TOGGLE
+#
+# Case Study mode, Critical Thinking level, and the Recall vs
+# Critical Thinking progress breakdown are Capstone 2 features.
+# They stay fully implemented (nothing below this flag was
+# deleted) but are hidden from the UI for the Capstone 1 demo.
+#
+# To bring them back: set this to True. That's the only change
+# needed -- everything else in this file reads this flag.
+# =========================================================
+
+SHOW_CAPSTONE_2_FEATURES = False
+
+
+# =========================================================
 # ENVIRONMENT
 # =========================================================
 
@@ -1044,13 +1059,14 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
+    mode_options = ["✏️ Practice", "📊 My Progress"]
+
+    if SHOW_CAPSTONE_2_FEATURES:
+        mode_options.insert(1, "🧬 Case Study")
+
     mode = st.radio(
         "Mode",
-        [
-            "✏️ Practice",
-            "🧬 Case Study",
-            "📊 My Progress"
-        ],
+        mode_options,
         label_visibility="collapsed"
     )
 
@@ -1061,17 +1077,21 @@ with st.sidebar:
             unsafe_allow_html=True
         )
 
+        level_options = [
+            "MCQ",
+            "1 Mark",
+            "2 Mark",
+            "3 Mark",
+            "4 Mark",
+            "5 Mark",
+        ]
+
+        if SHOW_CAPSTONE_2_FEATURES:
+            level_options.append("Critical Thinking")
+
         st.radio(
             "Question Level",
-            [
-                "MCQ",
-                "1 Mark",
-                "2 Mark",
-                "3 Mark",
-                "4 Mark",
-                "5 Mark",
-                "Critical Thinking"
-            ],
+            level_options,
             key="practice_level",
             on_change=_on_level_change,
             label_visibility="collapsed"
@@ -1309,15 +1329,20 @@ if mode == "✏️ Practice":
     # updates the sidebar selection, and vice versa -- one shared
     # source of truth either way.
 
+    pill_levels = ["MCQ", "1 Mark", "2 Mark", "3 Mark", "4 Mark", "5 Mark"]
+
+    if SHOW_CAPSTONE_2_FEATURES:
+        pill_levels.append("Critical Thinking")
+
     with st.container(
         key="level_pill_row"
     ):
 
-        pill_cols = st.columns(7)
+        pill_cols = st.columns(len(pill_levels))
 
         for pill_col, lvl in zip(
             pill_cols,
-            ["MCQ", "1 Mark", "2 Mark", "3 Mark", "4 Mark", "5 Mark", "Critical Thinking"]
+            pill_levels
         ):
 
             with pill_col:
@@ -2894,68 +2919,75 @@ elif mode == "📊 My Progress":
         # This is the actual pedagogical payoff of Capstone 2 --
         # showing that "knowing facts" and "applying them" are
         # tracked as two different skills, not one blended score.
+        #
+        # Hidden for the Capstone 1 demo (see SHOW_CAPSTONE_2_FEATURES
+        # at the top of this file) since Critical Thinking / Case
+        # Study are unreachable, so this would only ever show the
+        # empty-state caption.
         # =================================================
 
-        st.divider()
+        if SHOW_CAPSTONE_2_FEATURES:
 
-        st.subheader(
-            "🧠 Recall vs Critical Thinking"
-        )
+            st.divider()
 
-        try:
-
-            skill_breakdown = get_skill_breakdown(
-                student
+            st.subheader(
+                "🧠 Recall vs Critical Thinking"
             )
 
-        except Exception:
+            try:
 
-            skill_breakdown = None
-
-        if skill_breakdown and (
-            skill_breakdown["recall_attempts"]
-            or skill_breakdown["critical_thinking_attempts"]
-        ):
-
-            skill_col1, skill_col2 = st.columns(2)
-
-            with skill_col1:
-
-                st.metric(
-                    "Recall Average (MCQ / 1-5 Mark)",
-                    (
-                        f"{skill_breakdown['recall_average']}/10"
-                        if skill_breakdown["recall_average"] is not None
-                        else "Not attempted yet"
-                    ),
-                    help=f"{skill_breakdown['recall_attempts']} question(s) attempted"
+                skill_breakdown = get_skill_breakdown(
+                    student
                 )
 
-            with skill_col2:
+            except Exception:
 
-                st.metric(
-                    "Critical Thinking Average",
-                    (
-                        f"{skill_breakdown['critical_thinking_average']}/10"
-                        if skill_breakdown["critical_thinking_average"] is not None
-                        else "Not attempted yet"
-                    ),
-                    help=f"{skill_breakdown['critical_thinking_attempts']} question(s) attempted"
+                skill_breakdown = None
+
+            if skill_breakdown and (
+                skill_breakdown["recall_attempts"]
+                or skill_breakdown["critical_thinking_attempts"]
+            ):
+
+                skill_col1, skill_col2 = st.columns(2)
+
+                with skill_col1:
+
+                    st.metric(
+                        "Recall Average (MCQ / 1-5 Mark)",
+                        (
+                            f"{skill_breakdown['recall_average']}/10"
+                            if skill_breakdown["recall_average"] is not None
+                            else "Not attempted yet"
+                        ),
+                        help=f"{skill_breakdown['recall_attempts']} question(s) attempted"
+                    )
+
+                with skill_col2:
+
+                    st.metric(
+                        "Critical Thinking Average",
+                        (
+                            f"{skill_breakdown['critical_thinking_average']}/10"
+                            if skill_breakdown["critical_thinking_average"] is not None
+                            else "Not attempted yet"
+                        ),
+                        help=f"{skill_breakdown['critical_thinking_attempts']} question(s) attempted"
+                    )
+
+                st.caption(
+                    mastery_label(
+                        skill_breakdown["recall_average"],
+                        skill_breakdown["critical_thinking_average"]
+                    )
                 )
 
-            st.caption(
-                mastery_label(
-                    skill_breakdown["recall_average"],
-                    skill_breakdown["critical_thinking_average"]
+            else:
+
+                st.caption(
+                    "Attempt a few questions across both Practice "
+                    "and Case Study to see this breakdown."
                 )
-            )
-
-        else:
-
-            st.caption(
-                "Attempt a few questions across both Practice "
-                "and Case Study to see this breakdown."
-            )
 
 
         # =================================================
