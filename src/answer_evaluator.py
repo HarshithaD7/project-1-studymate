@@ -1626,6 +1626,17 @@ Return ONLY valid JSON:
 
     except Exception as error:
 
+        # Previously this failure was silent in the console/server
+        # logs (the caller only ever saw "score": 0, indistinguishable
+        # from a genuine 0/10 grade) -- the actual exception (Groq
+        # timeout, rate limit, malformed response, etc.) was only
+        # returned inside "improvement", which evaluate_system.py's
+        # harness never prints. Logging it here makes a real API
+        # failure visible instead of looking like the student failed.
+        print(
+            f"[BioAssist] evaluate_answer() failed, returning score 0: {error}"
+        )
+
         return {
             "score": 0,
             "exam_marks": 0,

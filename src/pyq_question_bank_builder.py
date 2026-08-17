@@ -56,10 +56,10 @@ VALID_CHAPTERS = [
     "Human Health and Diseases",
     "Microbes in Human Welfare",
     "Biotechnology: Principles and Processes",
-    "Biotechnology and its Applications",
+    "Biotechnology and its Application",
     "Organisms and Populations",
     "Ecosystem",
-    "Biodiversity and Conservation"
+    "Biodiversity and its Conservation"
 ]
 
 
@@ -1175,7 +1175,7 @@ CHAPTER_KEYWORDS = {
         "gene gun", "biolistics", "ligase", "palindromic",
     ],
 
-    "Biotechnology and its Applications": [
+    "Biotechnology and its Application": [
         "bt cotton", "bt toxin", "gm crop", "genetically modified crop",
         "gene therapy", "ada deficiency", "transgenic", "insulin",
         "humulin", "molecular diagnosis", "elisa", "golden rice", "rnai",
@@ -1198,7 +1198,7 @@ CHAPTER_KEYWORDS = {
         "humification", "litter",
     ],
 
-    "Biodiversity and Conservation": [
+    "Biodiversity and its Conservation": [
         "biodiversity", "species richness", "biodiversity hotspot",
         "endangered species", "extinction", "iucn", "red data book",
         "in-situ conservation", "in situ conservation",

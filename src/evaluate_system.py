@@ -44,10 +44,34 @@ VALID_CHAPTERS = {
     "Human Health and Diseases",
     "Microbes in Human Welfare",
     "Biotechnology: Principles and Processes",
-    "Biotechnology and its Applications",
+    "Biotechnology and its Application",
     "Organisms and Populations",
     "Ecosystem",
-    "Biodiversity and Conservation",
+    "Biodiversity and its Conservation",
+}
+
+# rag_service.load_chapter_db() requires the EXACT on-disk vector-DB
+# folder name, which is derived straight from the NCERT PDF filename
+# (see vectorize_book.py) and always carries a numeric prefix, e.g.
+# "1. Sexual Reproduction in Flowering Plants". The chapter names
+# above (and the ones stored in pyq_questions.json) are unprefixed,
+# so calling answer_question() with r["chapter"] directly always
+# missed the DB path -- this is why every question previously came
+# back with retrieved=0. Map unprefixed -> real folder name here.
+CHAPTER_TO_FOLDER = {
+    "Sexual Reproduction in Flowering Plants": "1. Sexual Reproduction in Flowering Plants",
+    "Human Reproduction": "2. Human Reproduction",
+    "Reproductive Health": "3. Reproductive Health",
+    "Principles of Inheritance and Variation": "4. Principles of Inheritance and Variation",
+    "Molecular Basis of Inheritance": "5. Molecular Basis of Inheritance",
+    "Evolution": "6. Evolution",
+    "Human Health and Diseases": "7. Human Health and Diseases",
+    "Microbes in Human Welfare": "8. Microbes in Human Welfare",
+    "Biotechnology: Principles and Processes": "9. Biotechnology - Principles and Processes",
+    "Biotechnology and its Application": "10. Biotechnology and its Application",
+    "Organisms and Populations": "11. Organisms and Populations",
+    "Ecosystem": "12. Ecosystem",
+    "Biodiversity and its Conservation": "13. Biodiversity and its Conservation",
 }
 
 
@@ -92,7 +116,9 @@ def run_learn_eval(sample_size=12):
     for r in chosen:
         try:
             answer, docs = answer_question(
-                r["question"], "Class 12", r["chapter"], explanation_level="Class 12"
+                r["question"], "Class 12",
+                CHAPTER_TO_FOLDER.get(r["chapter"], r["chapter"]),
+                explanation_level="Class 12"
             )
             overlap = word_overlap_ratio(answer, docs)
             n_docs = len(docs)
@@ -154,7 +180,8 @@ def run_mark_depth_eval():
         for quality, answer_text in case["answers"].items():
             try:
                 evaluation = evaluate_answer(
-                    case["question"], answer_text, "Class 12", case["chapter"],
+                    case["question"], answer_text, "Class 12",
+                    CHAPTER_TO_FOLDER.get(case["chapter"], case["chapter"]),
                     expected_answer=case["expected_answer"], question_level=case["level"],
                 )
                 score = evaluation.get("score")
