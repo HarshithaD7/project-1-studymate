@@ -241,6 +241,14 @@ vector_db
 !pyq_vector_db/**
 !model_answer_vector_db/**
 
+# Same trap, third time: the bundled sentence-transformers embedding
+# model (see scripts/download_embedding_model.py) is exactly the kind
+# of "downloaded ML model weight file" the *.bin rule above is meant
+# for -- but this specific copy is intentionally committed so
+# get_embeddings() in rag_service.py never needs to reach
+# huggingface.co at runtime.
+!models/all-MiniLM-L6-v2/**
+
 # Same trap, different file: get_chapter_list() in chatbot_utility.py
 # reads chapter names directly off these NCERT source PDFs at runtime,
 # so a fresh clone with no chapters here shows "No Biology chapters

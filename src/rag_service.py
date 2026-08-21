@@ -68,6 +68,21 @@ load_dotenv(
 # EMBEDDINGS
 # =========================================================
 
+# If a local copy of the model has been bundled into the repo (see
+# scripts/download_embedding_model.py), use that folder directly --
+# this is what actually removes the huggingface.co network
+# dependency, rather than just retrying it. Falls back to the
+# hub model id below if the bundle isn't present, so local dev
+# still works before anyone has run the download step.
+LOCAL_EMBEDDING_MODEL_DIR = os.path.join(
+    PROJECT_DIR,
+    "models",
+    "all-MiniLM-L6-v2"
+)
+
+HUB_EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+
 @lru_cache(maxsize=1)
 def get_embeddings():
 
@@ -75,16 +90,39 @@ def get_embeddings():
 
     from langchain_huggingface import HuggingFaceEmbeddings
 
-    # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are set at the top of
-    # this module (before this import ever runs anywhere in the
-    # process) to skip the network "check for updates" call that
-    # was adding ~90s to loading an already-cached local model.
-    # If the model somehow isn't cached yet, this raises and the
-    # except-block below retries with network access allowed.
+    if os.path.isdir(LOCAL_EMBEDDING_MODEL_DIR) and os.listdir(LOCAL_EMBEDDING_MODEL_DIR):
+
+        print(
+            "Loading embeddings from bundled local copy "
+            f"({LOCAL_EMBEDDING_MODEL_DIR}) -- no network required."
+        )
+
+        result = HuggingFaceEmbeddings(
+            model_name=LOCAL_EMBEDDING_MODEL_DIR,
+            model_kwargs={
+                "device": "cpu"
+            },
+            encode_kwargs={
+                "normalize_embeddings": True
+            }
+        )
+
+        _log_timing("get_embeddings() model load (first call only, local bundle)", time.time() - _start)
+
+        return result
+
+    # No bundled copy found -- fall back to loading from the
+    # HuggingFace Hub id. HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are
+    # set at the top of this module (before this import ever runs
+    # anywhere in the process) to skip the network "check for
+    # updates" call that was adding ~90s to loading an already-cached
+    # local model. If the model somehow isn't cached yet, this
+    # raises and the except-block below retries with network access
+    # allowed.
     try:
 
         result = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_name=HUB_EMBEDDING_MODEL_NAME,
             model_kwargs={
                 "device": "cpu"
             },
@@ -121,7 +159,7 @@ def get_embeddings():
 
             try:
                 result = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    model_name=HUB_EMBEDDING_MODEL_NAME,
                     model_kwargs={
                         "device": "cpu"
                     },
