@@ -135,7 +135,21 @@ celerybeat.pid
 *.sage.py
 
 #data
-data/
+# A plain "data/" (trailing slash) rule prunes the whole directory from
+# git's traversal, which means nested "!" negations below can never reach
+# inside it -- that's why the chapter PDFs went missing on a fresh clone
+# even after adding negation rules the first time. Using "data/*" instead
+# ignores data/'s direct children as a wildcard, which negation CAN reach
+# into. The NCERT chapter dropdown (get_chapter_list() in
+# chatbot_utility.py) reads chapter names directly from these PDFs at
+# runtime, so they must ship in the repo. Raw PYQ/model-answer PDFs stay
+# ignored -- they're only used by the one-time offline vectorize_book.py
+# script, never read at runtime.
+data/*
+!data/class_12/
+data/class_12/*
+!data/class_12/biology/
+!data/class_12/biology/*.pdf
 data_original/
 
 # Environments
@@ -226,6 +240,16 @@ vector_db
 !chapters_vector_db/**
 !pyq_vector_db/**
 !model_answer_vector_db/**
+
+# Same trap, different file: get_chapter_list() in chatbot_utility.py
+# reads chapter names directly off these NCERT source PDFs at runtime,
+# so a fresh clone with no chapters here shows "No Biology chapters
+# were found." The blanket *.pdf rule above (meant for generated
+# reports/scratch PDFs) was catching these too -- this undoes it only
+# for the 13 real NCERT chapter PDFs, not the raw PYQ/model-answer
+# PDFs elsewhere under data/, which are only needed by the one-time
+# offline vectorize_book.py script.
+!data/class_12/biology/*.pdf
 
 # Runtime data / backups (not source)
 student_progress.db
