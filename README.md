@@ -1,4 +1,4 @@
-# BioAssist AI
+# BioAssess AI
 
 An NCERT-grounded Biology learning and formative-assessment app for CBSE Class 12 students, built with Streamlit, LangChain (RAG), ChromaDB, and Groq/Llama 3.1.
 
