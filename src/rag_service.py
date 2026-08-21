@@ -105,15 +105,46 @@ def get_embeddings():
         os.environ.pop("HF_HUB_OFFLINE", None)
         os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
-        result = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={
-                "device": "cpu"
-            },
-            encode_kwargs={
-                "normalize_embeddings": True
-            }
-        )
+        # A fresh Streamlit Cloud container has no HF cache, so this
+        # online retry is the ONLY path on first load there -- if
+        # huggingface.co has a transient blip at that exact moment
+        # (seen live: "couldn't connect to huggingface.co ... and
+        # couldn't find them in cached files"), the whole app goes
+        # down with it. Retrying a few times with backoff costs
+        # nothing when the network is fine (succeeds on attempt 1)
+        # and meaningfully improves odds of surviving a one-off
+        # blip during something like a live demo.
+        last_network_error = None
+        result = None
+
+        for attempt in range(1, 4):
+
+            try:
+                result = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    model_kwargs={
+                        "device": "cpu"
+                    },
+                    encode_kwargs={
+                        "normalize_embeddings": True
+                    }
+                )
+                break
+
+            except Exception as network_error:
+
+                last_network_error = network_error
+
+                print(
+                    f"Embeddings download attempt {attempt}/3 failed: "
+                    f"{network_error}"
+                )
+
+                if attempt < 3:
+                    time.sleep(attempt * 3)
+
+        if result is None:
+            raise last_network_error
 
     # lru_cache means this body only runs once per process -- if
     # this print appears on every evaluation (not just the first),

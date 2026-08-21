@@ -589,23 +589,45 @@ Return ONLY valid JSON in this exact shape:
         student_answer
     )
 
-    try:
+    # invoke_llm() already retries once on a second model, but that
+    # only covers "this model is unavailable" -- if the whole
+    # container's network has a transient blip (seen live,
+    # coinciding with a HuggingFace download failure elsewhere in
+    # the same session), both models fail identically and this
+    # dropped straight to "could not verify" with no retry at all.
+    # A couple of quick retries here cost nothing when the network
+    # is fine and meaningfully improve survival odds during a demo.
+    parsed = None
 
-        _llm_start = time.time()
+    for attempt in range(1, 3):
 
-        response = invoke_llm(
-            prompt
-        )
+        try:
 
-        print(f"[BioAssist timing] LLM call (evaluate_unverified_mcq, every call): {time.time() - _llm_start:.2f}s")
+            _llm_start = time.time()
 
-        parsed = parse_json_response(
-            response.content
-        )
+            response = invoke_llm(
+                prompt
+            )
 
-    except Exception:
+            print(f"[BioAssist timing] LLM call (evaluate_unverified_mcq, attempt {attempt}/2): {time.time() - _llm_start:.2f}s")
 
-        parsed = None
+            parsed = parse_json_response(
+                response.content
+            )
+
+            break
+
+        except Exception as mcq_verify_error:
+
+            print(
+                f"evaluate_unverified_mcq attempt {attempt}/2 failed: "
+                f"{mcq_verify_error}"
+            )
+
+            parsed = None
+
+            if attempt < 2:
+                time.sleep(2)
 
     if not parsed or not str(
         parsed.get("correct_option", "")
