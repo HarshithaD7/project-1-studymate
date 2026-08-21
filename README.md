@@ -1,10 +1,10 @@
-# BioAssess AI
+# BioAssess AI: PYQ-Centric Intelligent System for Long and Short Answer Evaluation in NCERT Biology
 
 An NCERT-grounded Biology learning and formative-assessment app for CBSE Class 12 students, built with Streamlit, LangChain (RAG), ChromaDB, and Groq/Llama 3.1.
 
 Instead of generic AI answers, BioAssist keeps every explanation, question, and evaluation tied back to the actual NCERT Class 12 Biology textbook — and it clearly separates real Previous Year Questions (PYQs) from AI-generated practice questions, so students always know which is which.
 
-Live app: https://bioassistai.streamlit.app
+Live app: https://bioassessai.streamlit.app/
 
 ---
 
