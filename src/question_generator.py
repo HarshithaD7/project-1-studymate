@@ -4,7 +4,7 @@ import re
 
 from rag_service import (
     retrieve_ncert,
-    get_llm
+    invoke_llm
 )
 
 
@@ -417,7 +417,7 @@ Return exactly:
 
     try:
 
-        response = get_llm().invoke(
+        response = invoke_llm(
             prompt
         )
 
@@ -666,7 +666,7 @@ Return ONLY valid JSON in exactly this shape:
 
     try:
 
-        response = get_llm().invoke(
+        response = invoke_llm(
             prompt
         )
 

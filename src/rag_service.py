@@ -144,29 +144,41 @@ def get_llm():
         )
 
     return ChatGroq(
-        # Switched to openai/gpt-oss-20b earlier (Groq's suggested
-        # replacement ahead of llama-3.1-8b-instant's 2026-08-16
-        # deprecation), but that made things WORSE: gpt-oss-20b is
-        # a reasoning model -- by default it generates a hidden
-        # internal "thinking" pass before every answer, and that
-        # reasoning generation consumes real time and eats into
-        # the token budget on every single call, regardless of how
-        # short the final JSON is (console.groq.com/docs/reasoning).
-        # That's a bad fit for a short structured-output grading
-        # task that needs to be fast every time.
+        # llama-3.1-8b-instant was shut down on schedule (2026-08-16,
+        # confirmed via the "model_not_found" 404 this app started
+        # throwing) and no longer appears on console.groq.com/docs/models
+        # at all -- it's not even in the Deprecated table anymore, just
+        # gone. Current Production models (checked 2026-08-20) are only
+        # openai/gpt-oss-120b and openai/gpt-oss-20b; qwen/qwen3.6-27b
+        # is Preview-only, not Production, so it's a worse fit for a
+        # capstone app that needs to keep working through submission.
         #
-        # llama-3.1-8b-instant is still fully live today (checked
-        # console.groq.com/docs/models directly -- listed as a
-        # Production model at full speed, not yet actually shut
-        # down) and is a plain non-reasoning "instant" model, which
-        # is what this app actually needs. Using it until the
-        # 2026-08-16 shutdown; revisit before then (candidates at
-        # that point: gpt-oss-20b with reasoning_effort="low" to
-        # cut the reasoning overhead, or qwen/qwen3.6-27b with
-        # reasoning_effort="none").
-        model="llama-3.1-8b-instant",
+        # Using openai/gpt-oss-20b with reasoning_effort="low" this
+        # time (not left at the default) -- that's what avoids the
+        # earlier problem noted below: at default reasoning effort,
+        # gpt-oss-20b spends real time and tokens on a hidden internal
+        # "thinking" pass before every answer, which is a bad fit for
+        # a short structured-output grading task that needs to be fast
+        # every time. "low" keeps that thinking pass minimal.
+        model="openai/gpt-oss-20b",
+        reasoning_effort="low",
         temperature=0.2,
-        max_tokens=700,
+        # Was 700, tuned for llama-3.1-8b-instant (a plain
+        # non-reasoning model, so every token went straight to the
+        # visible answer). gpt-oss-20b is a reasoning model: even at
+        # reasoning_effort="low" it spends some of this same
+        # max_tokens budget on its hidden "thinking" pass before
+        # writing the JSON. With only 700 tokens total, that left
+        # too little room to finish the LAST field in the JSON
+        # schema -- which is "model_answer" in evaluate_answer() and
+        # "answer" in question_generator.py -- so it was coming back
+        # empty ("Suggested NCERT-Aligned Answer: Not available.")
+        # even though everything earlier in the JSON (score,
+        # correct_points, missing_points, etc.) was fine. Groq's own
+        # docs flag this exact tradeoff for reasoning models. Raised
+        # to 1536 for headroom; still well under a second of
+        # generation time at this model's ~1000 tokens/sec.
+        max_tokens=1536,
         groq_api_key=api_key,
         # Bounds worst-case latency: one attempt, 20s to fail, one
         # retry, 20s to fail again -- under a minute before
@@ -176,6 +188,98 @@ def get_llm():
         timeout=20,
         max_retries=1
     )
+
+
+@lru_cache(maxsize=1)
+def get_fallback_llm():
+    """
+    Second, independent Groq production model. Only used if the
+    primary model in get_llm() fails for any reason at call time --
+    most importantly, if Groq deprecates/renames it again like they
+    did to llama-3.1-8b-instant on 2026-08-16 with no advance code
+    change on our side. openai/gpt-oss-120b is the other current
+    Production-tier model on Groq (console.groq.com/docs/models),
+    deliberately different from the primary so a single bad model ID
+    can't take down both.
+    """
+
+    from langchain_groq import ChatGroq
+
+    api_key = os.getenv(
+        "GROQ_API_KEY"
+    )
+
+    if not api_key:
+
+        raise ValueError(
+            "GROQ_API_KEY not found.\n"
+            f"Expected .env at:\n{ENV_PATH}"
+        )
+
+    return ChatGroq(
+        model="openai/gpt-oss-120b",
+        reasoning_effort="low",
+        temperature=0.2,
+        # Kept in sync with get_llm()'s max_tokens -- see the
+        # comment there for why 700 wasn't enough for a reasoning
+        # model's hidden thinking pass plus a full JSON response.
+        max_tokens=1536,
+        groq_api_key=api_key,
+        timeout=20,
+        max_retries=1
+    )
+
+
+def invoke_llm(prompt):
+    """
+    Single entry point for every LLM call in the app -- use this
+    instead of calling get_llm().invoke(...) directly.
+
+    Tries the primary model (get_llm()) first. If that call raises
+    ANY exception -- the model being deprecated/renamed by Groq, a
+    rate limit, a transient network error -- it automatically retries
+    once against a second, independent model (get_fallback_llm())
+    before giving up. This is the direct fix for what happened on
+    2026-08-16: Groq deprecated llama-3.1-8b-instant with no warning
+    and every LLM call in the app broke at once. With this wrapper,
+    the app quietly falls back to a working model instead of failing
+    outright the next time a model gets deprecated mid-project.
+
+    Callers keep their existing try/except around this call for
+    display purposes (a friendly "couldn't grade this right now"
+    message) -- this function only adds the extra attempt in between,
+    it doesn't change what gets raised if BOTH models fail.
+    """
+
+    try:
+
+        return get_llm().invoke(
+            prompt
+        )
+
+    except Exception as primary_error:
+
+        print(
+            "[BioAssist] Primary LLM (openai/gpt-oss-20b) call failed, "
+            "retrying once on fallback model (openai/gpt-oss-120b):",
+            primary_error
+        )
+
+        try:
+
+            return get_fallback_llm().invoke(
+                prompt
+            )
+
+        except Exception as fallback_error:
+
+            print(
+                "[BioAssist] Fallback LLM (openai/gpt-oss-120b) also "
+                "failed:",
+                fallback_error
+            )
+
+            raise fallback_error from primary_error
 
 
 # =========================================================
@@ -428,7 +532,7 @@ RULES:
 
     try:
 
-        response = get_llm().invoke(
+        response = invoke_llm(
             prompt
         )
 

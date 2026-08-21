@@ -213,9 +213,19 @@ cython_debug/
 .venv/
 
 vector_db
-chapters_vector_db
-pyq_vector_db
-model_answer_vector_db
+
+# chapters_vector_db, pyq_vector_db, and model_answer_vector_db used
+# to be ignored here, but that means a fresh `git clone` (e.g. on
+# Streamlit Community Cloud) has no NCERT/PYQ content to retrieve at
+# all -- the app "runs" but Learn/Practice/Evaluate all come back
+# empty. They're small (~36MB total for all three), so committing
+# them is simpler and safer than trying to rebuild them at deploy
+# time. The lines below undo the *.bin ignore rule above (meant for
+# downloaded ML model weight files) specifically for these folders,
+# since Chroma's own index files happen to also use a .bin extension.
+!chapters_vector_db/**
+!pyq_vector_db/**
+!model_answer_vector_db/**
 
 # Runtime data / backups (not source)
 student_progress.db

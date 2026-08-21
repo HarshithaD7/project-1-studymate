@@ -4,13 +4,56 @@ import time
 
 from rag_service import (
     retrieve_ncert,
-    get_llm
+    invoke_llm
 )
 
 
 # =========================================================
 # HELPERS
 # =========================================================
+
+def _ncert_fallback_answer(question, selected_class, chapter):
+    """
+    Cheap, LLM-free fallback used only when there is genuinely no
+    reference answer to show a student -- the EMPTY ANSWER and
+    NON-ANSWER short-circuits below both return before the main
+    RAG+LLM call in this file even runs, so they can't rely on that
+    call's own model_answer field or its ncert_context fallback.
+    Most real PYQs also don't carry a printed answer_key (see
+    load_new_practice_question() in main.py), so without this a
+    zero-effort submission on a real PYQ would show a bare
+    "Suggested NCERT-Aligned Answer: Not available." with nothing
+    useful at all.
+
+    retrieve_ncert() is a plain vector similarity search (no LLM
+    call), so this stays fast even though it runs on every empty/
+    non-answer submission.
+    """
+
+    try:
+
+        docs = retrieve_ncert(
+            question,
+            selected_class,
+            chapter,
+            k=2
+        )
+
+    except Exception:
+
+        docs = []
+
+    chunks = [
+        getattr(doc, "page_content", "")
+        for doc in (docs or [])
+        if getattr(doc, "page_content", "")
+    ]
+
+    if not chunks:
+        return ""
+
+    return "\n\n".join(chunks)[:900]
+
 
 def safe_list(value):
     """
@@ -550,7 +593,7 @@ Return ONLY valid JSON in this exact shape:
 
         _llm_start = time.time()
 
-        response = get_llm().invoke(
+        response = invoke_llm(
             prompt
         )
 
@@ -1046,6 +1089,11 @@ def evaluate_answer(
                 "Write your answer before submitting.",
             "model_answer":
                 expected_answer
+                or _ncert_fallback_answer(
+                    question,
+                    selected_class,
+                    chapter
+                )
         }
 
 
@@ -1111,6 +1159,11 @@ def evaluate_answer(
                 "\"not sure\" cannot.",
             "model_answer":
                 expected_answer
+                or _ncert_fallback_answer(
+                    question,
+                    selected_class,
+                    chapter
+                )
         }
 
 
@@ -1395,6 +1448,14 @@ SCORING RULES:
     Biology terms that would strengthen the student's answer.
 
 17. Keep feedback understandable to a school student.
+
+18. "model_answer" is REQUIRED and must never be left blank.
+    Write a complete, NCERT-aligned model answer for THIS
+    question, at the depth expected for the mark level above,
+    grounded in the RETRIEVED NCERT EVIDENCE and REFERENCE /
+    EXPECTED ANSWER given earlier in this prompt. This is the
+    single most important field for the student -- do not skip
+    it or shorten it to save space.
 {reasoning_rule_text}
 Return ONLY valid JSON:
 
@@ -1417,7 +1478,7 @@ Return ONLY valid JSON:
 
         _llm_start = time.time()
 
-        response = get_llm().invoke(
+        response = invoke_llm(
             prompt
         )
 
@@ -1535,6 +1596,29 @@ Return ONLY valid JSON:
 
             model_answer = (
                 expected_answer
+            )
+
+        # Last-resort backstop: for real PYQs, expected_answer is
+        # usually blank on purpose (most source papers don't print
+        # an answer key -- see load_new_practice_question() in
+        # main.py), so if the LLM's own "model_answer" field also
+        # came back empty, both fallbacks above are empty and the
+        # student would see a bare "Not available." with nothing
+        # useful at all. ncert_context (built above, same function
+        # scope) is the real NCERT text this exact question was
+        # already grounded against -- showing it directly is far
+        # more useful than an empty box, even though it's the raw
+        # retrieved passage rather than a polished model answer.
+        if (
+            not model_answer
+            and ncert_context
+        ):
+
+            model_answer = (
+                "(Generated from retrieved NCERT evidence -- the "
+                "model did not return a written model answer this "
+                "time.)\n\n"
+                + ncert_context[:900]
             )
 
 

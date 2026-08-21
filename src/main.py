@@ -512,22 +512,6 @@ st.markdown(
         background: rgba(255, 255, 255, 0.02);
     }
 
-    /* Purely decorative botanical line-art, pinned to the
-       bottom of the sidebar to match the approved mockup. */
-
-    .sidebar-plant {
-        margin-top: 2rem;
-        opacity: 0.45;
-        pointer-events: none;
-        line-height: 0;
-    }
-
-    .sidebar-plant svg {
-        width: 90px;
-        height: auto;
-        display: block;
-    }
-
     .session-card .sc-title {
         font-size: 0.7rem;
         font-weight: 700;
@@ -1121,23 +1105,6 @@ with st.sidebar:
             <div class="sc-row"><span>Subject</span><span>Biology</span></div>
             <div class="sc-row"><span>Chapter</span><span>{html.escape(chapter_number)}</span></div>
             <div class="sc-row"><span>Questions Attempted</span><span>{st.session_state.questions_attempted_session}</span></div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        """
-        <div class="sidebar-plant" aria-hidden="true">
-            <svg viewBox="0 0 100 160" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round">
-                <path d="M35 155 C35 110 35 70 40 20"/>
-                <path d="M40 55 C55 50 65 38 68 22"/>
-                <path d="M38 85 C22 82 12 70 10 55"/>
-                <path d="M38 115 C55 111 63 98 65 82"/>
-                <ellipse cx="68" cy="20" rx="11" ry="6" fill="#22c55e" stroke="none" transform="rotate(-25 68 20)"/>
-                <ellipse cx="10" cy="53" rx="11" ry="6" fill="#22c55e" stroke="none" transform="rotate(25 10 53)"/>
-                <ellipse cx="65" cy="80" rx="11" ry="6" fill="#22c55e" stroke="none" transform="rotate(-25 65 80)"/>
-            </svg>
         </div>
         """,
         unsafe_allow_html=True
